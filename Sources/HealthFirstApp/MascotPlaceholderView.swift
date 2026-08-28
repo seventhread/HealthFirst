@@ -240,7 +240,12 @@ struct MascotPlaceholderView: View {
             .foregroundStyle(HealthFirstStyle.orange.opacity(0.55))
             .frame(height: max(2, size.height * 0.018))
             .position(x: size.width * 0.10, y: size.height * 0.69)
-            .opacity(max(0.35, 1 - pose.actionProgress * 0.65))
+            .opacity(
+                max(
+                    0.35,
+                    1.0 - Double(pose.actionProgress) * 0.65
+                )
+            )
 
         default:
             EmptyView()
@@ -258,7 +263,11 @@ struct MascotPlaceholderView: View {
                 .font(.system(size: max(8, size.width * 0.105), weight: .bold))
                 .foregroundStyle(HealthFirstStyle.orange.opacity(0.72))
                 .position(x: size.width * 0.08, y: size.height * 0.28)
-                .opacity(shouldReduceMotion ? 1 : max(0, 1 - pose.actionProgress))
+                .opacity(
+                    shouldReduceMotion
+                        ? 1.0
+                        : max(0.0, 1.0 - Double(pose.actionProgress))
+                )
 
         case .agreeing:
             checkStamp(in: size, scale: 0.82 + pose.actionProgress * 0.18)
@@ -267,9 +276,11 @@ struct MascotPlaceholderView: View {
         case .snoozing:
             TimeCardView(label: "稍后")
                 .frame(width: size.width * 0.32, height: size.height * 0.20)
-                .rotationEffect(.degrees(-4 + pose.actionPulse * 3))
+                .rotationEffect(
+                    .degrees(-4.0 + Double(pose.actionPulse) * 3.0)
+                )
                 .position(x: size.width * 0.10, y: size.height * 0.28)
-                .opacity(0.45 + pose.actionProgress * 0.55)
+                .opacity(0.45 + Double(pose.actionProgress) * 0.55)
 
         case .skipping:
             RoundedRectangle(cornerRadius: size.width * 0.025)
@@ -287,7 +298,9 @@ struct MascotPlaceholderView: View {
                         .frame(width: size.width * 0.16, height: max(2, size.height * 0.018))
                 }
                 .frame(width: size.width * 0.34, height: size.height * 0.10)
-                .rotationEffect(.degrees(7 + pose.actionPulse * 8))
+                .rotationEffect(
+                    .degrees(7.0 + Double(pose.actionPulse) * 8.0)
+                )
                 .position(
                     x: size.width * (0.91 + (1 - pose.actionProgress) * 0.10),
                     y: size.height * 0.42
@@ -305,7 +318,7 @@ struct MascotPlaceholderView: View {
                 }
                 .frame(width: size.width * 0.16, height: size.height * 0.24)
                 .position(x: size.width * 0.88, y: size.height * 0.18)
-                .opacity(0.50 + pose.actionProgress * 0.50)
+                .opacity(0.50 + Double(pose.actionProgress) * 0.50)
 
         case .followUp:
             BookmarkView()
@@ -330,7 +343,9 @@ struct MascotPlaceholderView: View {
                     axis: (x: 0, y: 1, z: 0),
                     perspective: shouldReduceMotion ? 0 : 0.35
                 )
-                .rotationEffect(.degrees(-3 + pose.actionPulse * 3))
+                .rotationEffect(
+                    .degrees(-3.0 + Double(pose.actionPulse) * 3.0)
+                )
                 .position(x: size.width * 0.87, y: size.height * 0.17)
 
         case .guidingEye:
@@ -497,7 +512,9 @@ private struct MascotPose {
     }
 
     var opacity: Double {
-        motion == .entering ? Double(0.48 + actionProgress * 0.52) : 1
+        motion == .entering
+            ? Double(CGFloat(0.48) + actionProgress * CGFloat(0.52))
+            : 1
     }
 
     var eyeOffset: CGSize {
