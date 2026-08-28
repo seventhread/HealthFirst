@@ -432,7 +432,9 @@ final class ReminderSchedulePolicyTests: XCTestCase {
         let suspendedAt = date(day: 17, hour: 18)
         let snapshot = policy.captureForSuspension(
             nextDue: [.standing: date(day: 18, hour: 9, minute: 5)],
-            deferredIntervalRemaining: [.standing: 5 * 60],
+            deferredIntervalRemaining: [
+                ReminderKind.standing: TimeInterval(5 * 60),
+            ],
             at: suspendedAt
         )
 
@@ -444,15 +446,15 @@ final class ReminderSchedulePolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            restored[.standing],
+            restored[ReminderKind.standing],
             date(day: 18, hour: 9, minute: 5)
         )
         XCTAssertEqual(
             policy.intervalRemaining(
                 in: snapshot,
                 systemInactivity: 0
-            )[.standing],
-            5 * 60
+            )[ReminderKind.standing],
+            TimeInterval(5 * 60)
         )
     }
 
