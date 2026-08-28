@@ -3,6 +3,49 @@ import XCTest
 @testable import HealthFirstApp
 
 final class ReminderSchedulePolicyTests: XCTestCase {
+    func testWorkdayIncludesStartAndExcludesEndAndWeekends() {
+        XCTAssertFalse(policy.isWithinWorkday(date(day: 17, hour: 8, minute: 59)))
+        XCTAssertTrue(policy.isWithinWorkday(date(day: 17, hour: 9)))
+        XCTAssertTrue(policy.isWithinWorkday(date(day: 17, hour: 16, minute: 59)))
+        XCTAssertFalse(policy.isWithinWorkday(date(day: 17, hour: 17)))
+        XCTAssertFalse(policy.isWithinWorkday(date(day: 22, hour: 10)))
+    }
+
+    func testCrossedIntervalOccurrenceDefersToNextWorkdayStart() {
+        let deferred = policy.deferredOccurrenceDate(
+            for: .standing,
+            after: date(day: 17, hour: 17)
+        )
+
+        XCTAssertEqual(deferred, date(day: 18, hour: 9))
+    }
+
+    func testCrossedQuietOccurrenceReturnsToNextCadenceSlot() {
+        let deferred = policy.deferredOccurrenceDate(
+            for: .quietPractice,
+            after: date(day: 17, hour: 17)
+        )
+
+        XCTAssertEqual(deferred, date(day: 18, hour: 11))
+    }
+
+    func testInvalidWorkdayRangeIsNotTreatedAsAllDay() {
+        let invalidPolicy = ReminderSchedulePolicy(
+            configuration: ReminderSchedulePolicy.Configuration(
+                eyeInterval: 20 * 60,
+                standingInterval: 40 * 60,
+                quietDailyCount: 3,
+                workdayStartHour: 18,
+                workdayEndHour: 9
+            ),
+            calendar: calendar
+        )
+
+        XCTAssertFalse(
+            invalidPolicy.isWithinWorkday(date(day: 17, hour: 20))
+        )
+    }
+
     func testSuspensionPreservesRemainingIntervalDuringCurrentWorkday() {
         let suspendedAt = date(day: 17, hour: 10)
         let originalDue = date(day: 17, hour: 10, minute: 25)
@@ -182,6 +225,30 @@ final class ReminderSchedulePolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(restored[.eye], date(day: 17, hour: 10, minute: 21))
+    }
+
+    func testDisabledKindCannotReturnFromGuidanceSnapshot() {
+        let guidanceStartedAt = date(day: 17, hour: 10)
+        let captured = policy.captureForGuidance(
+            nextDue: [
+                .eye: date(day: 17, hour: 10, minute: 5),
+                .standing: date(day: 17, hour: 10, minute: 10),
+            ],
+            at: guidanceStartedAt
+        )
+        let withoutEye = policy.removing(.eye, from: captured)
+        let restored = policy.restore(
+            withoutEye,
+            preserving: [:],
+            at: date(day: 17, hour: 10, minute: 1),
+            systemInactivity: 0
+        )
+
+        XCTAssertNil(restored[.eye])
+        XCTAssertEqual(
+            restored[.standing],
+            date(day: 17, hour: 10, minute: 11)
+        )
     }
 
     func testNestedSystemSuspensionRestoresGuidanceSnapshotLast() {

@@ -6,7 +6,8 @@ public enum ReminderKind: String, CaseIterable, Codable, Sendable {
     case standing
     case quietPractice
 
-    /// The fixed guided-session duration for this reminder category.
+    /// The recommended guided-session duration for this reminder category.
+    /// Individual reminder instances may snapshot a user-selected duration.
     public var guideDuration: TimeInterval {
         switch self {
         case .eye:

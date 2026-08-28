@@ -41,6 +41,7 @@ final class ReminderPanelController {
     func show<Content: View>(
         presentation: ReminderPanelPresentation = .compact,
         userInitiated: Bool = false,
+        allowsMouseInteraction: Bool = true,
         compactSize: CGSize = CGSize(width: 420, height: 280),
         seriousEmergencyAction: (() -> Void)? = nil,
         @ViewBuilder content: () -> Content
@@ -85,6 +86,10 @@ final class ReminderPanelController {
         panel.contentView = hostingView
         panel.setFrame(frame, display: true)
         panel.becomesKeyOnlyIfNeeded = !userInitiated
+        // Receipt bubbles are visual acknowledgements, not modal controls.
+        // Let clicks reach the app underneath while preserving the hosting
+        // view and its accessibility tree.
+        panel.ignoresMouseEvents = !allowsMouseInteraction
 
         currentPresentation = presentation
         currentCompactSize = compactSize
@@ -100,6 +105,8 @@ final class ReminderPanelController {
     }
 
     func dismiss() {
+        guard panel != nil else { return }
+        panel?.ignoresMouseEvents = false
         panel?.orderOut(nil)
         // Release the hosted view so it cannot retain AppModel while hidden.
         panel?.contentView = nil

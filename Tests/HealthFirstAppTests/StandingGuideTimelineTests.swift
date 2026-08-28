@@ -4,6 +4,141 @@ import XCTest
 final class StandingGuideTimelineTests: XCTestCase {
     private let accuracy = 1e-9
 
+    func testCompletionPropsUseVisibleStageContactPoints() {
+        XCTAssertEqual(
+            StandingStageGeometry.completionDockGrabPoint.x
+                - StandingStageGeometry.completionDockCenter.x,
+            111,
+            accuracy: accuracy
+        )
+        XCTAssertEqual(
+            StandingStageGeometry.completionDockGrabPoint.y,
+            StandingStageGeometry.completionDockCenter.y,
+            accuracy: accuracy
+        )
+        XCTAssertGreaterThan(
+            StandingStageGeometry.completionBackdropGrabPoint.y,
+            StandingStageGeometry.size.height - 20
+        )
+        XCTAssertLessThanOrEqual(
+            StandingStageGeometry.completionBackdropGrabPoint.y,
+            StandingStageGeometry.size.height
+        )
+    }
+
+    func testCollectionTimingKeepsSourceUntilPlacementCrossfade() {
+        XCTAssertEqual(StandingBeat.duration, 2.0, accuracy: accuracy)
+        XCTAssertLessThan(
+            StandingCollectionTiming.reachEnd,
+            StandingCollectionTiming.gripEnd
+        )
+        XCTAssertLessThan(
+            StandingCollectionTiming.gripEnd,
+            StandingCollectionTiming.pullEnd
+        )
+        XCTAssertLessThan(
+            StandingCollectionTiming.pullEnd,
+            StandingCollectionTiming.placeEnd
+        )
+        XCTAssertLessThan(
+            StandingCollectionTiming.placeEnd,
+            StandingCollectionTiming.releaseEnd
+        )
+        XCTAssertLessThan(StandingCollectionTiming.releaseEnd, 1)
+
+        for beat in StandingBeat.allCases {
+            let atGrip = snapshot(
+                beat,
+                normalizedProgress: StandingCollectionTiming.gripEnd
+            )
+            XCTAssertEqual(
+                atGrip.progress(for: beat),
+                StandingCollectionTiming.gripEnd,
+                accuracy: accuracy
+            )
+            XCTAssertEqual(atGrip.sourceOpacity(for: beat), 1, accuracy: accuracy)
+
+            let atPullEnd = snapshot(
+                beat,
+                normalizedProgress: StandingCollectionTiming.pullEnd
+            )
+            XCTAssertEqual(atPullEnd.sourceOpacity(for: beat), 1, accuracy: accuracy)
+
+            let placementMidpoint = (
+                StandingCollectionTiming.pullEnd
+                    + StandingCollectionTiming.placeEnd
+            ) / 2
+            let placing = snapshot(
+                beat,
+                normalizedProgress: placementMidpoint
+            )
+            XCTAssertEqual(placing.sourceOpacity(for: beat), 0.5, accuracy: accuracy)
+
+            let placed = snapshot(
+                beat,
+                normalizedProgress: StandingCollectionTiming.placeEnd
+            )
+            XCTAssertEqual(placed.sourceOpacity(for: beat), 0, accuracy: accuracy)
+            XCTAssertEqual(placed.placementProgress(for: beat), 1, accuracy: accuracy)
+        }
+    }
+
+    func testStandingSourcesUseDeliberateNestedInsets() {
+        let dockLeading = StandingStageGeometry.completionDockCenter.x - 111
+        let railsHalfWidth = StandingStageGeometry.railsSourceSize.width / 2
+        let backingHalfWidth = StandingStageGeometry.backingSourceSize.width / 2
+        let railsLeading = StandingStageGeometry.railsSourceCenter.x - railsHalfWidth
+        let backingLeading = StandingStageGeometry.backingSourceCenter.x - backingHalfWidth
+        let titleLeading = StandingStageGeometry.titleSourceCenter.x - 59
+
+        XCTAssertEqual(railsLeading, dockLeading + 8, accuracy: accuracy)
+        XCTAssertEqual(backingLeading, railsLeading + 8, accuracy: accuracy)
+        XCTAssertEqual(titleLeading, railsLeading + 16, accuracy: accuracy)
+        XCTAssertEqual(
+            StandingStageGeometry.railsSourceCenter.y
+                - StandingStageGeometry.railsSourceSize.height / 2,
+            51,
+            accuracy: accuracy
+        )
+        XCTAssertEqual(
+            StandingCollectionGeometry.sourceGrabPoint(for: .rails).x,
+            StandingStageGeometry.railsSourceCenter.x + railsHalfWidth - 1,
+            accuracy: accuracy
+        )
+        XCTAssertEqual(
+            StandingCollectionGeometry.sourceGrabPoint(for: .backing).x,
+            StandingStageGeometry.backingSourceCenter.x + backingHalfWidth,
+            accuracy: accuracy
+        )
+
+        let railsTrailing = StandingStageGeometry.railsSourceCenter.x
+            + railsHalfWidth
+        // The trolley cargo begins 6 pt inside its 74 pt stage frame.
+        let trolleyCargoLeading = StandingStageGeometry.trolleyCenter.x
+            - StandingStageGeometry.trolleySize.width / 2 + 6
+        XCTAssertEqual(
+            trolleyCargoLeading - railsTrailing,
+            8,
+            accuracy: accuracy
+        )
+    }
+
+    func testFirstCollectedPartBecomesDetachedTrolleyBase() {
+        let destination = StandingCollectionGeometry.destinationGrabPoint(for: .title)
+
+        XCTAssertEqual(StandingStageGeometry.baseDestinationCenter.x, 251, accuracy: accuracy)
+        XCTAssertEqual(StandingStageGeometry.baseDestinationCenter.y, 159, accuracy: accuracy)
+        XCTAssertEqual(destination.x, 273, accuracy: accuracy)
+        XCTAssertEqual(destination.y, 159, accuracy: accuracy)
+        XCTAssertEqual(
+            StandingStageGeometry.baseDestinationCenter.x + 22,
+            destination.x,
+            accuracy: accuracy
+        )
+        XCTAssertGreaterThan(StandingCollectionGeometry.home.x, destination.x)
+        XCTAssertGreaterThan(StandingCollectionGeometry.home.y, destination.y)
+    }
+
     func testGuideSnapshotsAtStoryboardTimes() {
         assertGuide(
             at: 0,
@@ -16,12 +151,12 @@ final class StandingGuideTimelineTests: XCTestCase {
             progress: [0, 0, 0, 0]
         )
         assertGuide(
-            at: 8.3,
+            at: StandingBeat.title.startSeconds + StandingBeat.duration / 2,
             activeBeat: .title,
             progress: [0.5, 0, 0, 0]
         )
         assertGuide(
-            at: 8.6,
+            at: StandingBeat.title.endSeconds,
             activeBeat: nil,
             progress: [1, 0, 0, 0]
         )
@@ -114,13 +249,13 @@ final class StandingGuideTimelineTests: XCTestCase {
         let outsideWindows: [TimeInterval] = [
             0,
             7.999,
-            8.6,
+            StandingBeat.title.endSeconds,
             21.999,
-            22.6,
+            StandingBeat.backing.endSeconds,
             37.999,
-            38.6,
+            StandingBeat.rails.endSeconds,
             51.999,
-            52.6,
+            StandingBeat.ribbon.endSeconds,
             60
         ]
         for elapsed in outsideWindows {
@@ -134,77 +269,180 @@ final class StandingGuideTimelineTests: XCTestCase {
 
     func testCompletionSnapshotsAtChoreographyBoundaries() {
         let initial = StandingCompletionTimeline.snapshot(elapsed: 0)
-        XCTAssertEqual(initial.cardPickupProgress, 0, accuracy: accuracy)
-        XCTAssertEqual(initial.cardPlacementProgress, 0, accuracy: accuracy)
+        XCTAssertEqual(initial.activeBeat, .dock)
+        assertPack(initial.dock, [0, 0, 0, 0, 0])
+        assertPack(initial.backdrop, [0, 0, 0, 0, 0])
         XCTAssertEqual(initial.trolleyCompressionProgress, 0, accuracy: accuracy)
         XCTAssertEqual(initial.smileProgress, 0, accuracy: accuracy)
-        XCTAssertEqual(initial.settleProgress, 0, accuracy: accuracy)
+        XCTAssertEqual(initial.receiptRevealProgress, 0, accuracy: accuracy)
         XCTAssertTrue(initial.isAnimating)
 
-        let pickup = StandingCompletionTimeline.snapshot(elapsed: 0.16)
-        XCTAssertEqual(pickup.cardPickupProgress, 1, accuracy: accuracy)
-        XCTAssertEqual(pickup.cardPlacementProgress, 0, accuracy: accuracy)
-        XCTAssertFalse(pickup.cardIsPlaced)
+        let dockReached = StandingCompletionTimeline.snapshot(elapsed: 0.28)
+        assertPack(dockReached.dock, [1, 0, 0, 0, 0])
+        assertPack(dockReached.backdrop, [0, 0, 0, 0, 0])
 
-        let placement = StandingCompletionTimeline.snapshot(elapsed: 0.42)
-        XCTAssertEqual(placement.cardPickupProgress, 1, accuracy: accuracy)
-        XCTAssertEqual(placement.cardPlacementProgress, 1, accuracy: accuracy)
-        XCTAssertTrue(placement.cardIsPlaced)
+        let dockGrabbed = StandingCompletionTimeline.snapshot(elapsed: 0.42)
+        assertPack(dockGrabbed.dock, [1, 1, 0, 0, 0])
+        assertPack(dockGrabbed.backdrop, [0, 0, 0, 0, 0])
 
-        let compressionPeak = StandingCompletionTimeline.snapshot(elapsed: 0.65)
+        let dockPlaced = StandingCompletionTimeline.snapshot(elapsed: 1.12)
+        assertPack(dockPlaced.dock, [1, 1, 1, 1, 0])
+        assertPack(dockPlaced.backdrop, [0, 0, 0, 0, 0])
+        XCTAssertTrue(dockPlaced.dock.isPlaced)
+
+        let firstCompressionPeak = StandingCompletionTimeline.snapshot(elapsed: 1.27)
         XCTAssertEqual(
-            compressionPeak.trolleyCompressionProgress,
+            firstCompressionPeak.trolleyCompressionProgress,
             1,
             accuracy: accuracy
         )
 
-        let compressionEnd = StandingCompletionTimeline.snapshot(elapsed: 0.78)
+        let pause = StandingCompletionTimeline.snapshot(elapsed: 1.37)
+        XCTAssertNil(pause.activeBeat)
+        assertPack(pause.dock, [1, 1, 1, 1, 1])
+        assertPack(pause.backdrop, [0, 0, 0, 0, 0])
+
+        let backdropReached = StandingCompletionTimeline.snapshot(elapsed: 1.72)
+        XCTAssertEqual(backdropReached.activeBeat, .backdrop)
+        assertPack(backdropReached.backdrop, [1, 0, 0, 0, 0])
+
+        let backdropGrabbed = StandingCompletionTimeline.snapshot(elapsed: 1.86)
+        assertPack(backdropGrabbed.backdrop, [1, 1, 0, 0, 0])
+
+        let backdropPlaced = StandingCompletionTimeline.snapshot(elapsed: 2.78)
+        assertPack(backdropPlaced.backdrop, [1, 1, 1, 1, 0])
+        XCTAssertTrue(backdropPlaced.backdrop.isPlaced)
+
+        let secondCompressionPeak = StandingCompletionTimeline.snapshot(elapsed: 2.93)
         XCTAssertEqual(
-            compressionEnd.trolleyCompressionProgress,
-            0,
+            secondCompressionPeak.trolleyCompressionProgress,
+            1,
             accuracy: accuracy
         )
 
-        let completed = StandingCompletionTimeline.snapshot(elapsed: 1.05)
-        XCTAssertEqual(completed.cardPickupProgress, 1, accuracy: accuracy)
-        XCTAssertEqual(completed.cardPlacementProgress, 1, accuracy: accuracy)
+        let completed = StandingCompletionTimeline.snapshot(
+            elapsed: StandingCompletionTimeline.duration
+        )
+        XCTAssertNil(completed.activeBeat)
+        assertPack(completed.dock, [1, 1, 1, 1, 1])
+        assertPack(completed.backdrop, [1, 1, 1, 1, 1])
         XCTAssertEqual(completed.trolleyCompressionProgress, 0, accuracy: accuracy)
         XCTAssertEqual(completed.smileProgress, 1, accuracy: accuracy)
-        XCTAssertEqual(completed.settleProgress, 1, accuracy: accuracy)
+        XCTAssertEqual(completed.receiptRevealProgress, 1, accuracy: accuracy)
+        XCTAssertTrue(completed.isReadyForReceipt)
         XCTAssertFalse(completed.isAnimating)
     }
 
-    func testCompletionCompressionHasOnePeakAndReturnsToZero() {
-        let samples = (0...105).map { step in
-            StandingCompletionTimeline.snapshot(
-                elapsed: Double(step) / 100
-            ).trolleyCompressionProgress
-        }
+    func testCompletionPackOrderNeverOverlaps() {
+        var previousDock = StandingCompletionTimeline.snapshot(elapsed: 0).dock
+        var previousBackdrop = StandingCompletionTimeline.snapshot(elapsed: 0).backdrop
 
-        XCTAssertEqual(samples.first, 0)
-        XCTAssertEqual(samples.last, 0)
+        for elapsed in stride(
+            from: 0.0,
+            through: StandingCompletionTimeline.duration,
+            by: 0.01
+        ) {
+            let snapshot = StandingCompletionTimeline.snapshot(elapsed: elapsed)
 
-        for index in 1...65 {
-            XCTAssertGreaterThanOrEqual(
-                samples[index] + accuracy,
-                samples[index - 1],
-                "compression regressed before peak at sample \(index)"
-            )
-        }
-        for index in 66..<samples.count {
-            XCTAssertLessThanOrEqual(
-                samples[index],
-                samples[index - 1] + accuracy,
-                "compression rose after peak at sample \(index)"
-            )
-        }
+            if snapshot.backdrop.reachProgress > 0 {
+                XCTAssertTrue(
+                    snapshot.dock.isPlaced,
+                    "backdrop began before dock placement at \(elapsed)s"
+                )
+                XCTAssertEqual(snapshot.dock.releaseProgress, 1, accuracy: accuracy)
+            }
+            if snapshot.receiptRevealProgress > 0 {
+                XCTAssertTrue(snapshot.backdrop.isPlaced)
+                XCTAssertEqual(snapshot.backdrop.releaseProgress, 1, accuracy: accuracy)
+            }
 
-        XCTAssertEqual(samples.max(), 1)
-        XCTAssertEqual(
-            samples.filter { abs($0 - 1) <= accuracy }.count,
-            1,
-            "compression should have exactly one sampled peak"
+            assertPackMonotonic(previous: previousDock, current: snapshot.dock)
+            assertPackMonotonic(previous: previousBackdrop, current: snapshot.backdrop)
+            previousDock = snapshot.dock
+            previousBackdrop = snapshot.backdrop
+        }
+    }
+
+    func testCompletionCompressionHasTwoSeparatedPeaksAndReturnsToZero() {
+        let firstPeak = StandingCompletionTimeline.snapshot(elapsed: 1.27)
+        let between = StandingCompletionTimeline.snapshot(elapsed: 1.42)
+        let secondPeak = StandingCompletionTimeline.snapshot(elapsed: 2.93)
+        let completed = StandingCompletionTimeline.snapshot(
+            elapsed: StandingCompletionTimeline.duration
         )
+
+        XCTAssertEqual(firstPeak.trolleyCompressionProgress, 1, accuracy: accuracy)
+        XCTAssertEqual(between.trolleyCompressionProgress, 0, accuracy: accuracy)
+        XCTAssertEqual(secondPeak.trolleyCompressionProgress, 1, accuracy: accuracy)
+        XCTAssertEqual(completed.trolleyCompressionProgress, 0, accuracy: accuracy)
+    }
+
+    func testCompletionElapsedClampsInvalidAndOutOfRangeInputs() {
+        let nan = StandingCompletionTimeline.snapshot(elapsed: .nan)
+        XCTAssertEqual(nan, .initial)
+
+        let negative = StandingCompletionTimeline.snapshot(elapsed: -4)
+        XCTAssertEqual(negative, .initial)
+
+        let overtime = StandingCompletionTimeline.snapshot(elapsed: 400)
+        XCTAssertEqual(overtime, .completed)
+        XCTAssertFalse(overtime.isAnimating)
+        XCTAssertTrue(overtime.isReadyForReceipt)
+    }
+
+    private func assertPack(
+        _ pack: StandingPackProgress,
+        _ expected: [Double],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let actual = [
+            pack.reachProgress,
+            pack.gripProgress,
+            pack.transferProgress,
+            pack.placementProgress,
+            pack.releaseProgress,
+        ]
+        XCTAssertEqual(actual.count, expected.count, file: file, line: line)
+        for (actualValue, expectedValue) in zip(actual, expected) {
+            XCTAssertEqual(
+                actualValue,
+                expectedValue,
+                accuracy: accuracy,
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func assertPackMonotonic(
+        previous: StandingPackProgress,
+        current: StandingPackProgress,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let oldValues = [
+            previous.reachProgress,
+            previous.gripProgress,
+            previous.transferProgress,
+            previous.placementProgress,
+            previous.releaseProgress,
+        ]
+        let newValues = [
+            current.reachProgress,
+            current.gripProgress,
+            current.transferProgress,
+            current.placementProgress,
+            current.releaseProgress,
+        ]
+        for (oldValue, newValue) in zip(oldValues, newValues) {
+            XCTAssertGreaterThanOrEqual(
+                newValue + accuracy,
+                oldValue,
+                file: file,
+                line: line
+            )
+        }
     }
 
     private func assertGuide(
@@ -228,5 +466,15 @@ final class StandingGuideTimelineTests: XCTestCase {
                 line: line
             )
         }
+    }
+
+    private func snapshot(
+        _ beat: StandingBeat,
+        normalizedProgress: Double
+    ) -> StandingGuideSnapshot {
+        StandingGuideTimeline.snapshot(
+            elapsed: beat.startSeconds
+                + normalizedProgress * StandingBeat.duration
+        )
     }
 }

@@ -1,22 +1,40 @@
+import AppKit
 import SwiftUI
 
+enum ReminderSettingsLayout {
+    static let valueControlWidth: CGFloat = 104
+}
+
+enum DurationOptionFormatter {
+    static func selectionTitle(seconds: Int) -> String {
+        seconds >= 60 && seconds.isMultiple(of: 60)
+            ? "\(seconds / 60) 分钟"
+            : "\(seconds) 秒"
+    }
+}
+
 struct SettingsView: View {
+    @AppStorage(SettingsKey.selectedSettingsTab) private var selectedTab = SettingsTab.general.rawValue
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             GeneralSettingsView()
                 .tabItem {
                     Label("常规", systemImage: "gearshape")
                 }
+                .tag(SettingsTab.general.rawValue)
 
             ReminderSettingsView()
                 .tabItem {
                     Label("提醒", systemImage: "bell")
                 }
+                .tag(SettingsTab.reminders.rawValue)
 
             AppearanceSettingsView()
                 .tabItem {
                     Label("外观", systemImage: "paintbrush")
                 }
+                .tag(SettingsTab.appearance.rawValue)
         }
         .padding(20)
         .frame(minWidth: 590, idealWidth: 620, minHeight: 480, idealHeight: 540)
@@ -24,10 +42,17 @@ struct SettingsView: View {
 }
 
 private struct GeneralSettingsView: View {
-    @AppStorage(SettingsKey.launchAtLogin) private var launchAtLogin = false
+    @StateObject private var launchAtLoginController = LaunchAtLoginController()
     @AppStorage(SettingsKey.workdayStartHour) private var workdayStartHour = AppSettings.defaultWorkdayStartHour
     @AppStorage(SettingsKey.workdayEndHour) private var workdayEndHour = AppSettings.defaultWorkdayEndHour
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = false
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLoginController.presentation.isEnabled },
+            set: { launchAtLoginController.setEnabled($0) }
+        )
+    }
 
     var body: some View {
         SettingsPage(
@@ -37,33 +62,53 @@ private struct GeneralSettingsView: View {
             SettingsSection(title: "启动") {
                 SettingsToggleRow(
                     title: "登录后自动启动",
-                    detail: "当前原型只保存这个偏好；稍后接入 macOS 登录项权限后才会真正生效。",
-                    isOn: $launchAtLogin
+                    detail: launchAtLoginController.presentation.detail,
+                    isOn: launchAtLoginBinding,
+                    isEnabled: launchAtLoginController.presentation.canToggle
                 )
+
+                if let errorMessage = launchAtLoginController.errorMessage {
+                    SettingsNote(
+                        text: errorMessage,
+                        systemImage: "exclamationmark.triangle.fill",
+                        color: .red
+                    )
+                }
+
+                if launchAtLoginController.presentation.showsSystemSettingsButton {
+                    Button("打开登录项设置") {
+                        launchAtLoginController.openSystemSettings()
+                    }
+                    .buttonStyle(.link)
+                }
             }
 
             SettingsSection(title: "工作时段") {
                 HStack(spacing: 14) {
-                    HourPicker(title: "开始", selection: $workdayStartHour)
+                    HourPicker(
+                        title: "开始",
+                        selection: $workdayStartHour,
+                        options: WorkdayHoursPolicy.startOptions(
+                            endingAt: workdayEndHour
+                        )
+                    )
                     Image(systemName: "arrow.right")
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
-                    HourPicker(title: "结束", selection: $workdayEndHour)
+                    HourPicker(
+                        title: "结束",
+                        selection: $workdayEndHour,
+                        options: WorkdayHoursPolicy.endOptions(
+                            startingAt: workdayStartHour
+                        )
+                    )
                 }
 
-                if workdayStartHour >= workdayEndHour {
-                    SettingsNote(
-                        text: "结束时间需要晚于开始时间；跨午夜的工作时段暂不支持。",
-                        systemImage: "exclamationmark.triangle.fill",
-                        color: HealthFirstStyle.orange
-                    )
-                } else {
-                    SettingsNote(
-                        text: "工作时段外会暂停自动提醒，手动预览仍可使用。",
-                        systemImage: "moon.stars",
-                        color: HealthFirstStyle.lavenderDark
-                    )
-                }
+                SettingsNote(
+                    text: "结束时间必须晚于开始时间，暂不支持跨午夜；工作时段外会暂停自动提醒，手动预览仍可使用。",
+                    systemImage: "moon.stars",
+                    color: HealthFirstStyle.lavenderDark
+                )
             }
 
             SettingsSection(title: "声音") {
@@ -74,57 +119,98 @@ private struct GeneralSettingsView: View {
                 )
             }
         }
+        .onAppear {
+            normalizeWorkdayHours()
+            launchAtLoginController.refresh()
+        }
+        .onChange(of: workdayStartHour) { _ in
+            normalizeWorkdayHours()
+        }
+        .onChange(of: workdayEndHour) { _ in
+            normalizeWorkdayHours()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            launchAtLoginController.refresh()
+        }
+    }
+
+    private func normalizeWorkdayHours() {
+        let hours = WorkdayHoursPolicy.normalized(
+            startHour: workdayStartHour,
+            endHour: workdayEndHour
+        )
+        workdayStartHour = hours.startHour
+        workdayEndHour = hours.endHour
     }
 }
 
 private struct ReminderSettingsView: View {
     @AppStorage(SettingsKey.eyeReminderEnabled) private var eyeReminderEnabled = true
     @AppStorage(SettingsKey.eyeIntervalMinutes) private var eyeIntervalMinutes = AppSettings.defaultEyeIntervalMinutes
+    @AppStorage(SettingsKey.eyeGuideDurationSeconds) private var eyeGuideDurationSeconds = AppSettings.defaultEyeGuideDurationSeconds
     @AppStorage(SettingsKey.standReminderEnabled) private var standReminderEnabled = true
     @AppStorage(SettingsKey.standIntervalMinutes) private var standIntervalMinutes = AppSettings.defaultStandIntervalMinutes
+    @AppStorage(SettingsKey.standGuideDurationSeconds) private var standGuideDurationSeconds = AppSettings.defaultStandGuideDurationSeconds
     @AppStorage(SettingsKey.quietReminderEnabled) private var quietReminderEnabled = false
     @AppStorage(SettingsKey.quietDailyCount) private var quietDailyCount = AppSettings.defaultQuietDailyCount
-
-    private let eyeIntervals = [15, 20, 30, 45, 60]
+    @AppStorage(SettingsKey.quietGuideDurationSeconds) private var quietGuideDurationSeconds = AppSettings.defaultQuietGuideDurationSeconds
 
     var body: some View {
         SettingsPage(
             title: "提醒",
-            subtitle: "三种提醒彼此独立，需要时再打开。"
+            subtitle: "分别设置多久出现一次，以及点击开始后陪伴多久。"
         ) {
             SettingsSection(title: "护眼") {
                 SettingsToggleRow(
-                    title: "望远 20 秒",
-                    detail: "默认开启；到点后由角色陪你完成倒计时。",
+                    title: "望远休息",
+                    detail: "默认开启；到点后由角色陪你完成一次远焦点休息。",
                     isOn: $eyeReminderEnabled
                 )
 
                 SettingsValueRow(title: "提醒间隔", isEnabled: eyeReminderEnabled) {
-                    Picker("提醒间隔", selection: $eyeIntervalMinutes) {
-                        ForEach(eyeIntervals, id: \.self) { minutes in
-                            Text("\(minutes) 分钟").tag(minutes)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 118)
+                    SettingsSelectionMenu(
+                        selection: $eyeIntervalMinutes,
+                        options: ReminderSettingsOptions.eyeIntervals,
+                        accessibilityLabel: "提醒间隔",
+                        selectionTitle: { "\($0) 分钟" },
+                        optionTitle: { "\($0) 分钟" }
+                    )
+                }
+
+                SettingsValueRow(title: "陪伴时长", isEnabled: eyeReminderEnabled) {
+                    DurationPicker(
+                        selection: $eyeGuideDurationSeconds,
+                        options: ReminderSettingsOptions.eyeDurations
+                    )
                 }
             }
 
             SettingsSection(title: "站立") {
                 SettingsToggleRow(
                     title: "离开椅子活动一下",
-                    detail: "默认开启，每次由角色陪伴 60 秒。",
+                    detail: "默认开启；起身后角色会陪你完成倒计时。",
                     isOn: $standReminderEnabled
                 )
 
                 SettingsValueRow(title: "提醒间隔", isEnabled: standReminderEnabled) {
-                    Stepper(
-                        "\(standIntervalMinutes) 分钟",
-                        value: $standIntervalMinutes,
-                        in: 20...120,
-                        step: 10
+                    SettingsSelectionMenu(
+                        selection: $standIntervalMinutes,
+                        options: ReminderSettingsOptions.standingIntervals,
+                        accessibilityLabel: "提醒间隔",
+                        selectionTitle: { "\($0) 分钟" },
+                        optionTitle: { "\($0) 分钟" }
                     )
-                    .frame(width: 150)
+                }
+
+                SettingsValueRow(title: "陪伴时长", isEnabled: standReminderEnabled) {
+                    DurationPicker(
+                        selection: $standGuideDurationSeconds,
+                        options: ReminderSettingsOptions.standingDurations
+                    )
                 }
             }
 
@@ -139,9 +225,16 @@ private struct ReminderSettingsView: View {
                     Stepper(
                         "\(quietDailyCount) 次",
                         value: $quietDailyCount,
-                        in: 1...6
+                        in: ReminderSettingsOptions.quietDailyCountRange
                     )
                     .frame(width: 120)
+                }
+
+                SettingsValueRow(title: "陪伴时长", isEnabled: quietReminderEnabled) {
+                    DurationPicker(
+                        selection: $quietGuideDurationSeconds,
+                        options: ReminderSettingsOptions.quietDurations
+                    )
                 }
 
                 SettingsNote(
@@ -273,6 +366,7 @@ private struct SettingsToggleRow: View {
     let title: String
     let detail: String
     @Binding var isOn: Bool
+    var isEnabled = true
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -289,6 +383,8 @@ private struct SettingsToggleRow: View {
 
             Toggle(title, isOn: $isOn)
                 .labelsHidden()
+                .disabled(!isEnabled)
+                .opacity(isEnabled ? 1 : 0.45)
         }
         .accessibilityElement(children: .contain)
     }
@@ -315,13 +411,14 @@ private struct SettingsValueRow<Control: View>: View {
 private struct HourPicker: View {
     let title: String
     @Binding var selection: Int
+    let options: [Int]
 
     var body: some View {
         HStack(spacing: 8) {
             Text(title)
                 .foregroundStyle(.secondary)
             Picker(title, selection: $selection) {
-                ForEach(0..<24, id: \.self) { hour in
+                ForEach(options, id: \.self) { hour in
                     Text(String(format: "%02d:00", hour)).tag(hour)
                 }
             }
@@ -329,6 +426,78 @@ private struct HourPicker: View {
             .frame(width: 100)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct DurationPicker: View {
+    @Binding var selection: Int
+    let options: [Int]
+
+    var body: some View {
+        SettingsSelectionMenu(
+            selection: $selection,
+            options: options,
+            accessibilityLabel: "陪伴时长",
+            selectionTitle: {
+                DurationOptionFormatter.selectionTitle(seconds: $0)
+            },
+            optionTitle: {
+                DurationOptionFormatter.selectionTitle(seconds: $0)
+            }
+        )
+    }
+}
+
+private struct SettingsSelectionMenu: View {
+    @Binding var selection: Int
+    let options: [Int]
+    let accessibilityLabel: String
+    let selectionTitle: (Int) -> String
+    let optionTitle: (Int) -> String
+    @State private var isHovering = false
+
+    var body: some View {
+        Menu {
+            Picker(accessibilityLabel, selection: $selection) {
+                ForEach(options, id: \.self) { option in
+                    Text(optionTitle(option))
+                        .tag(option)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 8) {
+                Text(selectionTitle(selection))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .accessibilityHidden(true)
+            }
+            .font(.system(size: 13))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .frame(
+                width: ReminderSettingsLayout.valueControlWidth,
+                height: 24
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? 0.10 : 0.065))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(.primary.opacity(0.035))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(selectionTitle(selection))
     }
 }
 

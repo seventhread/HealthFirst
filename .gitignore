@@ -4,3 +4,31 @@
 .DS_Store
 xcuserdata/
 DerivedData/
+
+# Local release artifacts
+dist/
+release/
+*.dmg
+*.pkg
+*.zip
+*.sha256
+SHA256SUMS
+*.xcarchive
+
+# Signing identities and provisioning material must never enter the repository
+*.p12
+*.pfx
+*.cer
+*.crt
+*.key
+*.pem
+*.p8
+*.keychain
+*.keychain-db
+*.provisionprofile
+*.mobileprovision
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

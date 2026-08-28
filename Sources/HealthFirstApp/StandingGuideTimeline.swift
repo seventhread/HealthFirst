@@ -2,15 +2,17 @@ import Foundation
 
 /// The four one-shot prop handoffs used during the sixty-second standing guide.
 ///
-/// The names describe both the source fragment and its final trolley role:
-/// title -> handle, backing -> cargo bin, rails -> chassis, ribbon -> tie.
+/// The names describe the source fragment. Their final trolley roles are:
+/// title -> base, backing -> cargo bin, rails -> frame/handle, ribbon -> tie.
 enum StandingBeat: String, CaseIterable, Equatable, Sendable {
     case title
     case backing
     case rails
     case ribbon
 
-    static let duration: TimeInterval = 0.6
+    /// Long enough to read as reach → grip → pull → place at the live card
+    /// size, while remaining a compact one-shot milestone.
+    static let duration: TimeInterval = 2.0
 
     var startSeconds: TimeInterval {
         switch self {
@@ -33,20 +35,20 @@ enum StandingBeat: String, CaseIterable, Equatable, Sendable {
 /// Progress for the four parts of the single shared standing trolley.
 /// Every value is clamped to `0...1` and is derived from elapsed time only.
 struct StandingAssembly: Equatable, Sendable {
-    let handleProgress: Double
+    let baseProgress: Double
     let cargoBinProgress: Double
     let chassisProgress: Double
     let ribbonProgress: Double
 
     static let empty = StandingAssembly(
-        handleProgress: 0,
+        baseProgress: 0,
         cargoBinProgress: 0,
         chassisProgress: 0,
         ribbonProgress: 0
     )
 
     static let completed = StandingAssembly(
-        handleProgress: 1,
+        baseProgress: 1,
         cargoBinProgress: 1,
         chassisProgress: 1,
         ribbonProgress: 1
@@ -55,7 +57,7 @@ struct StandingAssembly: Equatable, Sendable {
     func progress(for beat: StandingBeat) -> Double {
         switch beat {
         case .title:
-            handleProgress
+            baseProgress
         case .backing:
             cargoBinProgress
         case .rails:
@@ -81,7 +83,22 @@ struct StandingGuideSnapshot: Equatable, Sendable {
     }
 
     func sourceOpacity(for beat: StandingBeat) -> Double {
-        1 - progress(for: beat)
+        1 - placementProgress(for: beat)
+    }
+
+    /// The source fragment remains fully present while the character reaches
+    /// and pulls it. Only the final placement phase dissolves it into the
+    /// permanent trolley part.
+    func placementProgress(for beat: StandingBeat) -> Double {
+        let progress = progress(for: beat)
+        let duration = StandingCollectionTiming.placeEnd
+            - StandingCollectionTiming.pullEnd
+        guard duration > 0 else {
+            return progress >= StandingCollectionTiming.placeEnd ? 1 : 0
+        }
+        return clamp(
+            (progress - StandingCollectionTiming.pullEnd) / duration
+        )
     }
 
     static var initial: StandingGuideSnapshot {
@@ -107,7 +124,7 @@ enum StandingGuideTimeline {
     static func snapshot(elapsed rawElapsed: TimeInterval) -> StandingGuideSnapshot {
         let elapsed = clampedElapsed(rawElapsed, duration: duration)
         let assembly = StandingAssembly(
-            handleProgress: phase(for: .title, elapsed: elapsed),
+            baseProgress: phase(for: .title, elapsed: elapsed),
             cargoBinProgress: phase(for: .backing, elapsed: elapsed),
             chassisProgress: phase(for: .rails, elapsed: elapsed),
             ribbonProgress: phase(for: .ribbon, elapsed: elapsed)
@@ -138,25 +155,47 @@ enum StandingGuideTimeline {
     }
 }
 
-/// The short, one-shot finish after the sixty-second guide.
+enum StandingCompletionBeat: String, Equatable, Sendable {
+    case dock
+    case backdrop
+}
+
+/// One object's reach → grip → transfer → placement → release state. Keeping
+/// all five phases explicit makes it impossible for the backdrop to start
+/// while the countdown dock is still travelling.
+struct StandingPackProgress: Equatable, Sendable {
+    let reachProgress: Double
+    let gripProgress: Double
+    let transferProgress: Double
+    let placementProgress: Double
+    let releaseProgress: Double
+
+    var isPlaced: Bool {
+        placementProgress >= 1
+    }
+}
+
+/// The two-step finish after the sixty-second guide.
 ///
-/// The card is first collected from the safety dock, then placed on the same
-/// trolley assembled by `StandingGuideTimeline`. The trolley performs one
-/// three-point load response before the character settles into a smile.
+/// Completion remains a business-state boundary at exactly sixty seconds.
+/// This snapshot only choreographs the non-blocking visual epilogue: the
+/// character first packs the real countdown-dock silhouette, pauses, and then
+/// folds the large card backdrop into the same trolley before smiling.
 struct StandingCompletionSnapshot: Equatable, Sendable {
     let elapsed: TimeInterval
-    let cardPickupProgress: Double
-    let cardPlacementProgress: Double
+    let activeBeat: StandingCompletionBeat?
+    let dock: StandingPackProgress
+    let backdrop: StandingPackProgress
     let trolleyCompressionProgress: Double
     let smileProgress: Double
-    let settleProgress: Double
+    let receiptRevealProgress: Double
 
     var isAnimating: Bool {
         elapsed < StandingCompletionTimeline.duration
     }
 
-    var cardIsPlaced: Bool {
-        cardPlacementProgress >= 1
+    var isReadyForReceipt: Bool {
+        receiptRevealProgress >= 1
     }
 
     static var initial: StandingCompletionSnapshot {
@@ -169,23 +208,106 @@ struct StandingCompletionSnapshot: Equatable, Sendable {
 }
 
 enum StandingCompletionTimeline {
-    static let duration: TimeInterval = 1.05
+    static let dockReleaseEnd: TimeInterval = 1.32
+    static let backdropStart: TimeInterval = 1.42
+    static let backdropReleaseEnd: TimeInterval = 3.08
+    static let receiptRevealStart: TimeInterval = 3.30
+    static let duration: TimeInterval = 3.60
 
     static func snapshot(elapsed rawElapsed: TimeInterval) -> StandingCompletionSnapshot {
         let elapsed = clampedElapsed(rawElapsed, duration: duration)
+        let dock = packProgress(
+            elapsed: elapsed,
+            reach: 0...0.28,
+            grip: 0.28...0.42,
+            transfer: 0.42...1.12,
+            placement: 0.98...1.12,
+            release: 1.12...dockReleaseEnd
+        )
+        let backdrop = packProgress(
+            elapsed: elapsed,
+            reach: backdropStart...1.72,
+            grip: 1.72...1.86,
+            transfer: 1.86...2.78,
+            placement: 2.60...2.78,
+            release: 2.78...backdropReleaseEnd
+        )
+
+        let activeBeat: StandingCompletionBeat?
+        if elapsed < dockReleaseEnd {
+            activeBeat = .dock
+        } else if elapsed >= backdropStart,
+                  elapsed < backdropReleaseEnd {
+            activeBeat = .backdrop
+        } else {
+            activeBeat = nil
+        }
+
+        let dockCompression = triangularPhase(
+            from: 1.12,
+            peak: 1.27,
+            to: 1.42,
+            elapsed: elapsed
+        )
+        let backdropCompression = triangularPhase(
+            from: 2.78,
+            peak: 2.93,
+            to: backdropReleaseEnd,
+            elapsed: elapsed
+        )
 
         return StandingCompletionSnapshot(
             elapsed: elapsed,
-            cardPickupProgress: phase(from: 0, to: 0.16, elapsed: elapsed),
-            cardPlacementProgress: phase(from: 0.16, to: 0.42, elapsed: elapsed),
-            trolleyCompressionProgress: triangularPhase(
-                from: 0.52,
-                peak: 0.65,
-                to: 0.78,
+            activeBeat: activeBeat,
+            dock: dock,
+            backdrop: backdrop,
+            trolleyCompressionProgress: max(
+                dockCompression,
+                backdropCompression
+            ),
+            smileProgress: phase(from: 3.08, to: 3.36, elapsed: elapsed),
+            receiptRevealProgress: phase(
+                from: receiptRevealStart,
+                to: 3.58,
+                elapsed: elapsed
+            )
+        )
+    }
+
+    private static func packProgress(
+        elapsed: TimeInterval,
+        reach: ClosedRange<TimeInterval>,
+        grip: ClosedRange<TimeInterval>,
+        transfer: ClosedRange<TimeInterval>,
+        placement: ClosedRange<TimeInterval>,
+        release: ClosedRange<TimeInterval>
+    ) -> StandingPackProgress {
+        StandingPackProgress(
+            reachProgress: phase(
+                from: reach.lowerBound,
+                to: reach.upperBound,
                 elapsed: elapsed
             ),
-            smileProgress: phase(from: 0.50, to: 0.86, elapsed: elapsed),
-            settleProgress: phase(from: 0.86, to: duration, elapsed: elapsed)
+            gripProgress: phase(
+                from: grip.lowerBound,
+                to: grip.upperBound,
+                elapsed: elapsed
+            ),
+            transferProgress: phase(
+                from: transfer.lowerBound,
+                to: transfer.upperBound,
+                elapsed: elapsed
+            ),
+            placementProgress: phase(
+                from: placement.lowerBound,
+                to: placement.upperBound,
+                elapsed: elapsed
+            ),
+            releaseProgress: phase(
+                from: release.lowerBound,
+                to: release.upperBound,
+                elapsed: elapsed
+            )
         )
     }
 

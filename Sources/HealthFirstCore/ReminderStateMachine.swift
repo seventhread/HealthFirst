@@ -87,6 +87,7 @@ public struct ReminderInstance: Identifiable, Equatable, Codable, Sendable {
     public let kind: ReminderKind
     public let mode: ReminderMode
     public let retryDelay: TimeInterval
+    public let guideDuration: TimeInterval
     public private(set) var state: ReminderState
 
     public init(
@@ -94,12 +95,17 @@ public struct ReminderInstance: Identifiable, Equatable, Codable, Sendable {
         kind: ReminderKind,
         dueAt: Date,
         mode: ReminderMode = .standard,
-        retryDelay: TimeInterval = 3 * 60
+        retryDelay: TimeInterval = 3 * 60,
+        guideDuration: TimeInterval? = nil
     ) {
         self.id = id
         self.kind = kind
         self.mode = mode
         self.retryDelay = retryDelay
+        self.guideDuration = Self.resolvedGuideDuration(
+            guideDuration,
+            fallback: kind.guideDuration
+        )
         self.state = .scheduled(dueAt: dueAt)
     }
 
@@ -114,7 +120,8 @@ public struct ReminderInstance: Identifiable, Equatable, Codable, Sendable {
             kind: kind,
             dueAt: dueAt,
             mode: configuration.mode,
-            retryDelay: configuration.retryDelay
+            retryDelay: configuration.retryDelay,
+            guideDuration: nil
         )
     }
 
@@ -129,6 +136,7 @@ public struct ReminderInstance: Identifiable, Equatable, Codable, Sendable {
             kind: kind,
             mode: mode,
             retryDelay: retryDelay,
+            guideDuration: guideDuration,
             event: event,
             at: date
         )
@@ -144,6 +152,48 @@ public struct ReminderInstance: Identifiable, Equatable, Codable, Sendable {
     ) throws -> ReminderState {
         try send(event, at: date)
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case mode
+        case retryDelay
+        case guideDuration
+        case state
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(ReminderKind.self, forKey: .kind)
+        mode = try container.decode(ReminderMode.self, forKey: .mode)
+        retryDelay = try container.decode(TimeInterval.self, forKey: .retryDelay)
+        guideDuration = Self.resolvedGuideDuration(
+            try container.decodeIfPresent(TimeInterval.self, forKey: .guideDuration),
+            fallback: kind.guideDuration
+        )
+        state = try container.decode(ReminderState.self, forKey: .state)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(retryDelay, forKey: .retryDelay)
+        try container.encode(guideDuration, forKey: .guideDuration)
+        try container.encode(state, forKey: .state)
+    }
+
+    private static func resolvedGuideDuration(
+        _ duration: TimeInterval?,
+        fallback: TimeInterval
+    ) -> TimeInterval {
+        guard let duration, duration.isFinite, duration > 0 else {
+            return fallback
+        }
+        return duration
+    }
 }
 
 public enum ReminderStateMachine {
@@ -152,6 +202,7 @@ public enum ReminderStateMachine {
         kind: ReminderKind,
         mode: ReminderMode,
         retryDelay: TimeInterval,
+        guideDuration: TimeInterval? = nil,
         event: ReminderEvent,
         at date: Date
     ) throws -> ReminderState {
@@ -198,7 +249,9 @@ public enum ReminderStateMachine {
              (.seriousPresented, .start):
             return .guided(
                 startedAt: date,
-                endsAt: date.addingTimeInterval(kind.guideDuration)
+                endsAt: date.addingTimeInterval(
+                    resolvedGuideDuration(guideDuration, for: kind)
+                )
             )
 
         case (.firstPresented, .snooze(let duration)):
@@ -253,6 +306,16 @@ public enum ReminderStateMachine {
                 received: received
             )
         }
+    }
+
+    private static func resolvedGuideDuration(
+        _ duration: TimeInterval?,
+        for kind: ReminderKind
+    ) -> TimeInterval {
+        guard let duration, duration.isFinite, duration > 0 else {
+            return kind.guideDuration
+        }
+        return duration
     }
 
     private static func snoozedState(

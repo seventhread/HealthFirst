@@ -232,6 +232,11 @@ struct MotionLabView: View {
                                 progress: progress,
                                 reduceMotion: effectiveReduceMotion
                             )
+                        } else if selectedKind == .quietPractice {
+                            QuietMotionLabStage(
+                                progress: progress,
+                                reduceMotion: effectiveReduceMotion
+                            )
                         } else {
                             GuidanceChromePreview(
                                 kind: selectedKind,
@@ -340,9 +345,9 @@ struct MotionLabView: View {
             case ..<StandingBeat.title.startSeconds:
                 "检查装饰轨"
             case ..<StandingBeat.title.endSeconds:
-                "标题条 → 车把"
+                "标题条 → 托板"
             case ..<StandingBeat.backing.startSeconds:
-                "车把已就位"
+                "托板已就位"
             case ..<StandingBeat.backing.endSeconds:
                 "背板 → 货箱"
             case ..<StandingBeat.rails.startSeconds:
@@ -453,6 +458,116 @@ private struct GuidanceChromePreview: View {
     }
 }
 
+/// Mirrors the live quiet-practice composition: the full card clears while
+/// the single safety dock travels above the back-facing mascot. This remains
+/// visual-only so the lab cannot accidentally start or end a real reminder.
+private struct QuietMotionLabStage: View {
+    let progress: Double
+    let reduceMotion: Bool
+
+    private var elapsed: Double {
+        min(max(progress, 0), 1) * 30
+    }
+
+    private var chromeOpacity: Double {
+        1 - phase(from: 0.18, to: 0.78)
+    }
+
+    private var dockTravel: Double {
+        reduceMotion ? 1 : phase(from: 0.82, to: 1.56)
+    }
+
+    private var dockPosition: CGPoint {
+        let eased = CGFloat(dockTravel * dockTravel * (3 - 2 * dockTravel))
+        let arc = CGFloat(sin(dockTravel * .pi) * 12)
+        return CGPoint(
+            x: QuietCompanionLayout.initialDockCenter.x
+                + (QuietCompanionLayout.settledDockCenter.x
+                    - QuietCompanionLayout.initialDockCenter.x) * eased,
+            y: QuietCompanionLayout.initialDockCenter.y
+                + (QuietCompanionLayout.settledDockCenter.y
+                    - QuietCompanionLayout.initialDockCenter.y) * eased
+                - arc
+        )
+    }
+
+    private var mascotPosition: CGPoint {
+        let eased = CGFloat(dockTravel * dockTravel * (3 - 2 * dockTravel))
+        return CGPoint(
+            x: QuietCompanionLayout.initialMascotCenter.x
+                + (QuietCompanionLayout.settledMascotCenter.x
+                    - QuietCompanionLayout.initialMascotCenter.x) * eased,
+            y: QuietCompanionLayout.settledMascotCenter.y
+        )
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.white.opacity(0.88))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(.primary.opacity(0.07))
+                }
+                .opacity(chromeOpacity)
+
+            ProductionMascotView(
+                motion: .guidingQuiet,
+                progress: progress,
+                actionProgress: reduceMotion
+                    ? 1
+                    : min(max((elapsed - 0.56) / 0.26, 0), 1),
+                reduceMotion: reduceMotion
+            )
+            .frame(width: 106, height: 124)
+            .position(mascotPosition)
+
+            quietSafetyDock
+                .position(x: dockPosition.x, y: dockPosition.y)
+                .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+        }
+        .frame(width: 420, height: 280, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .scaleEffect(0.60)
+        .frame(width: 252, height: 168)
+        .clipped()
+    }
+
+    private var quietSafetyDock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(value: min(max(progress, 0), 1))
+                .tint(HealthFirstStyle.orange)
+
+            HStack(spacing: 8) {
+                Text("还剩 \(max(0, Int(ceil(30 - elapsed)))) 秒")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                Spacer(minLength: 4)
+                Text("先到这里")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: QuietCompanionLayout.dockWidth, height: 54)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(HealthFirstStyle.secondarySurface.opacity(0.98))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.primary.opacity(0.09))
+        }
+    }
+
+    private func phase(from start: Double, to end: Double) -> Double {
+        guard end > start else { return elapsed >= end ? 1 : 0 }
+        return min(max((elapsed - start) / (end - start), 0), 1)
+    }
+}
+
 /// The standing preview uses the same 420 x 280 geometry, trolley and
 /// production character poses as the live reminder. Only the fixed safety
 /// dock below is a non-interactive lab label.
@@ -479,30 +594,28 @@ private struct StandingMotionLabStage: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.white.opacity(0.88))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(.primary.opacity(0.07))
-                }
-                .frame(
-                    width: StandingStageGeometry.size.width,
-                    height: StandingStageGeometry.size.height
+            if stage == .completion {
+                StandingCompletionBackdropView(
+                    completion: completion,
+                    chromeOpacity: 0.32,
+                    reduceMotion: reduceMotion
                 )
                 .zIndex(-1)
+            } else {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.white.opacity(0.88))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(.primary.opacity(0.07))
+                    }
+                    .frame(
+                        width: StandingStageGeometry.size.width,
+                        height: StandingStageGeometry.size.height
+                    )
+                    .zIndex(-1)
+            }
 
-            assembly
-                .zIndex(0)
-
-            mascot
-                .frame(
-                    width: StandingStageGeometry.roleSlot.width,
-                    height: StandingStageGeometry.roleSlot.height
-                )
-                .position(
-                    x: StandingStageGeometry.roleSlot.midX,
-                    y: StandingStageGeometry.roleSlot.midY
-                )
+            standingPerformance
                 .zIndex(4)
 
             if stage == .guidance {
@@ -524,64 +637,48 @@ private struct StandingMotionLabStage: View {
     }
 
     @ViewBuilder
-    private var assembly: some View {
+    private var standingPerformance: some View {
         switch stage {
         case .guidance:
-            StandingAssemblyView(
-                elapsed: guidanceElapsed,
-                reduceMotion: reduceMotion
-            )
+            let snapshot = StandingGuideTimeline.snapshot(elapsed: guidanceElapsed)
+            ZStack(alignment: .topLeading) {
+                StandingDynamicMascotView(
+                    snapshot: snapshot,
+                    reduceMotion: reduceMotion,
+                    layer: .back
+                )
+                StandingAssemblyView(
+                    snapshot: snapshot,
+                    reduceMotion: reduceMotion
+                )
+                StandingDynamicMascotView(
+                    snapshot: snapshot,
+                    reduceMotion: reduceMotion,
+                    layer: .front
+                )
+            }
 
         case .completion:
-            StandingAssemblyView(
-                snapshot: .completed,
-                completion: completion,
-                reduceMotion: reduceMotion
-            )
+            ZStack(alignment: .topLeading) {
+                StandingDynamicMascotView(
+                    snapshot: .completed,
+                    reduceMotion: reduceMotion,
+                    completion: completion,
+                    layer: .back
+                )
+                StandingAssemblyView(
+                    snapshot: .completed,
+                    completion: completion,
+                    reduceMotion: reduceMotion
+                )
+                StandingDynamicMascotView(
+                    snapshot: .completed,
+                    reduceMotion: reduceMotion,
+                    completion: completion,
+                    layer: .front
+                )
+            }
         }
-    }
-
-    @ViewBuilder
-    private var mascot: some View {
-        switch stage {
-        case .guidance:
-            ProductionMascotView(
-                motion: .guidingStanding,
-                progress: normalizedProgress,
-                reduceMotion: reduceMotion,
-                acceptanceSide: .viewerLeft
-            )
-
-        case .completion:
-            let presentation = completionMascotPresentation
-            ProductionMascotView(
-                expression: presentation.smiles ? .subtleSmile : .neutral,
-                motion: .guidingStanding,
-                progress: 1,
-                actionProgress: presentation.actionProgress,
-                reduceMotion: reduceMotion,
-                acceptanceSide: .viewerLeft,
-                standingBeat: presentation.beat
-            )
-        }
-    }
-
-    /// Match the live reminder exactly: the completion-specific lift starts
-    /// from the existing cart grip and returns to it before the smile.
-    private var completionMascotPresentation: StandingCompletionMascotPresentation {
-        if completionElapsed < 0.50 {
-            return StandingCompletionMascotPresentation(
-                beat: .completionLift,
-                actionProgress: min(max(completionElapsed / 0.50, 0), 1),
-                smiles: false
-            )
-        }
-
-        return StandingCompletionMascotPresentation(
-            beat: .cartHoldSmile,
-            actionProgress: completion.smileProgress,
-            smiles: true
-        )
     }
 
     private var standingSafetyDock: some View {
@@ -611,12 +708,6 @@ private struct StandingMotionLabStage: View {
                 .strokeBorder(.primary.opacity(0.09))
         }
     }
-}
-
-private struct StandingCompletionMascotPresentation {
-    let beat: StandingMascotBeat
-    let actionProgress: Double
-    let smiles: Bool
 }
 
 private struct MotionOption: Identifiable {

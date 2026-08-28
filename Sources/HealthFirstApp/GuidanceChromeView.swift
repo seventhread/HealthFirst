@@ -9,11 +9,18 @@ import SwiftUI
 struct GuidanceChromeView: View {
     let kind: ReminderKind
     let progress: Double
+    let guideDuration: TimeInterval
     let reduceMotion: Bool
 
-    init(kind: ReminderKind, progress: Double, reduceMotion: Bool) {
+    init(
+        kind: ReminderKind,
+        progress: Double,
+        guideDuration: TimeInterval? = nil,
+        reduceMotion: Bool
+    ) {
         self.kind = kind
         self.progress = progress
+        self.guideDuration = guideDuration ?? kind.guideDuration
         self.reduceMotion = reduceMotion
     }
 
@@ -43,7 +50,7 @@ struct GuidanceChromeView: View {
         let handoff = timedPhase(
             startSeconds: 0.56,
             endSeconds: 1.10,
-            totalSeconds: ReminderKind.eye.guideDuration
+            totalSeconds: guideDuration
         )
         let settled = eased(handoff)
 
@@ -162,19 +169,19 @@ struct GuidanceChromeView: View {
     private var standingChrome: some View {
         let title = milestonePhase(
             atSeconds: 8,
-            totalSeconds: ReminderKind.standing.guideDuration
+            totalSeconds: guideDuration
         )
         let backing = milestonePhase(
             atSeconds: 22,
-            totalSeconds: ReminderKind.standing.guideDuration
+            totalSeconds: guideDuration
         )
         let rails = milestonePhase(
             atSeconds: 38,
-            totalSeconds: ReminderKind.standing.guideDuration
+            totalSeconds: guideDuration
         )
         let ribbon = milestonePhase(
             atSeconds: 52,
-            totalSeconds: ReminderKind.standing.guideDuration
+            totalSeconds: guideDuration
         )
 
         return ZStack {
@@ -348,17 +355,17 @@ struct GuidanceChromeView: View {
         let firstFold = timedPhase(
             startSeconds: 0.56,
             endSeconds: 0.90,
-            totalSeconds: ReminderKind.quietPractice.guideDuration
+            totalSeconds: guideDuration
         )
         let secondFold = timedPhase(
             startSeconds: 0.80,
             endSeconds: 1.20,
-            totalSeconds: ReminderKind.quietPractice.guideDuration
+            totalSeconds: guideDuration
         )
         let sealed = timedPhase(
             startSeconds: 1.12,
             endSeconds: 1.46,
-            totalSeconds: ReminderKind.quietPractice.guideDuration
+            totalSeconds: guideDuration
         )
 
         return ZStack {
@@ -462,7 +469,7 @@ struct GuidanceChromeView: View {
     ) -> Double {
         timedPhase(
             startSeconds: seconds,
-            endSeconds: seconds + 0.6,
+            endSeconds: seconds + StandingBeat.duration,
             totalSeconds: totalSeconds
         )
     }

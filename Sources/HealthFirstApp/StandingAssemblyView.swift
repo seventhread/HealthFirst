@@ -19,25 +19,41 @@ enum StandingStageGeometry {
     static let carryHandPoint = CGPoint(x: 298, y: 140)
     static let lowHandPoint = CGPoint(x: 290, y: 167)
 
-    static let titleSourceCenter = CGPoint(x: 95, y: 67)
-    static let backingSourceCenter = CGPoint(x: 113, y: 116)
-    static let railsSourceCenter = CGPoint(x: 126, y: 111)
+    // Header and safety dock share the 24 pt interaction baseline. Decorative
+    // fragments step inward from it so the stage reads as an intentional
+    // nested workspace rather than several cards glued to one edge.
+    static let titleSourceCenter = CGPoint(x: 107, y: 68)
+    static let backingSourceCenter = CGPoint(x: 124, y: 119)
+    static let backingSourceSize = CGSize(width: 168, height: 52)
+    static let railsSourceCenter = CGPoint(x: 126, y: 119)
+    static let railsSourceSize = CGSize(width: 188, height: 136)
+    static let ribbonSourceCenter = CGPoint(x: 340, y: 157)
 
     // Keep the assembled trolley above the fixed 222 pt safety dock. Its
     // handle extends down to the character's low clamp rather than moving the
     // interactive dock or letting decorative artwork sit underneath it.
     static let trolleyCenter = CGPoint(x: 259, y: 150)
     static let trolleySize = CGSize(width: 74, height: 68)
-    static let trolleyHandlePoint = lowHandPoint
+    static let baseDestinationCenter = CGPoint(x: 251, y: 159)
     static let cargoBinCenter = CGPoint(x: 255, y: 143)
     static let chassisCenter = CGPoint(x: 258, y: 160)
 
     static let reelPoint = CGPoint(x: 350, y: 157)
     static let ribbonKnotPoint = CGPoint(x: 250, y: 118)
 
-    static let completionCardDockPoint = CGPoint(x: 206, y: 244)
-    static let completionCardPickupPoint = highHandPoint
+    // Completion begins with a visual replica of the live 222 pt safety dock.
+    // The clamp meets its right edge, then keeps that exact edge attached as
+    // the dock folds into a small trolley card.
+    static let completionDockCenter = CGPoint(x: 135, y: 232)
+    static let completionDockGrabPoint = CGPoint(x: 246, y: 232)
+    static let completionDockDestinationGrabPoint = CGPoint(x: 282, y: 143)
     static let completionCardDestination = CGPoint(x: 255, y: 115)
+
+    // Only after the dock has settled does the hand take the lower edge of the
+    // large background. Its source offset from the 420 x 280 card centre is
+    // (36, 128), which remains under the clamp throughout non-uniform folding.
+    static let completionBackdropGrabPoint = CGPoint(x: 246, y: 268)
+    static let completionBackdropDestinationGrabPoint = CGPoint(x: 282, y: 143)
 }
 
 /// Decorative standing-session stage shared by guided and completed states.
@@ -77,8 +93,7 @@ struct StandingAssemblyView: View {
             titleSource
             backingSource
             railsSource
-
-            ribbonExtension
+            ribbonSource
 
             StandingTrolleyView(
                 assembly: snapshot.assembly,
@@ -86,9 +101,11 @@ struct StandingAssemblyView: View {
             )
             .position(StandingStageGeometry.trolleyCenter)
             .offset(y: trolleyCompressionOffset)
+            .zIndex(1)
 
             if let completion {
-                completionCard(for: completion)
+                completionDock(for: completion)
+                packedCompletionCard(for: completion)
             }
         }
         .frame(
@@ -116,22 +133,31 @@ struct StandingAssemblyView: View {
             )
             .frame(width: 88, height: 2)
             .position(x: StandingStageGeometry.trolleyCenter.x, y: 181)
-            .opacity(snapshot.assembly.chassisProgress)
+            .opacity(
+                standingPlacementOpacity(
+                    snapshot.assembly.chassisProgress
+                )
+            )
     }
 
     private var titleSource: some View {
         standingTitleFragment
             .modifier(
                 StandingFragmentTransferModifier(
-                    progress: snapshot.assembly.handleProgress,
-                    source: StandingStageGeometry.titleSourceCenter,
-                    waypoint: StandingStageGeometry.highHandPoint,
-                    destination: StandingStageGeometry.trolleyHandlePoint,
-                    destinationScale: 0.31,
-                    rotation: -7,
+                    progress: snapshot.assembly.baseProgress,
+                    sourceCenter: StandingStageGeometry.titleSourceCenter,
+                    sourceGripPoint: StandingCollectionGeometry.sourceGrabPoint(
+                        for: .title
+                    ),
+                    destinationCenter: StandingStageGeometry.baseDestinationCenter,
+                    destinationGripPoint: StandingCollectionGeometry.destinationGrabPoint(
+                        for: .title
+                    ),
+                    destinationScale: 44.0 / 118.0,
                     reduceMotion: reduceMotion
                 )
             )
+            .zIndex(2)
     }
 
     private var backingSource: some View {
@@ -139,14 +165,19 @@ struct StandingAssemblyView: View {
             .modifier(
                 StandingFragmentTransferModifier(
                     progress: snapshot.assembly.cargoBinProgress,
-                    source: StandingStageGeometry.backingSourceCenter,
-                    waypoint: StandingStageGeometry.carryHandPoint,
-                    destination: StandingStageGeometry.cargoBinCenter,
-                    destinationScale: 0.31,
-                    rotation: 5,
+                    sourceCenter: StandingStageGeometry.backingSourceCenter,
+                    sourceGripPoint: StandingCollectionGeometry.sourceGrabPoint(
+                        for: .backing
+                    ),
+                    destinationCenter: StandingStageGeometry.cargoBinCenter,
+                    destinationGripPoint: StandingCollectionGeometry.destinationGrabPoint(
+                        for: .backing
+                    ),
+                    destinationScale: 27.0 / 84.0,
                     reduceMotion: reduceMotion
                 )
             )
+            .zIndex(2)
     }
 
     private var railsSource: some View {
@@ -162,41 +193,48 @@ struct StandingAssemblyView: View {
                 ),
                 style: StrokeStyle(lineWidth: 1.9, lineCap: .round)
             )
-            .frame(width: 226, height: 148)
+            .frame(
+                width: StandingStageGeometry.railsSourceSize.width,
+                height: StandingStageGeometry.railsSourceSize.height
+            )
             .modifier(
                 StandingFragmentTransferModifier(
                     progress: snapshot.assembly.chassisProgress,
-                    source: StandingStageGeometry.railsSourceCenter,
-                    waypoint: StandingStageGeometry.carryHandPoint,
-                    destination: StandingStageGeometry.chassisCenter,
-                    destinationScale: 0.25,
-                    rotation: -8,
+                    sourceCenter: StandingStageGeometry.railsSourceCenter,
+                    sourceGripPoint: StandingCollectionGeometry.sourceGrabPoint(
+                        for: .rails
+                    ),
+                    destinationCenter: StandingStageGeometry.chassisCenter,
+                    destinationGripPoint: StandingCollectionGeometry.destinationGrabPoint(
+                        for: .rails
+                    ),
+                    destinationScale: 32.0 / 94.0,
                     reduceMotion: reduceMotion
                 )
             )
+            .zIndex(2)
     }
 
-    private var ribbonExtension: some View {
-        StandingRibbonPath(
-            start: StandingStageGeometry.reelPoint,
-            end: CGPoint(
-                x: StandingStageGeometry.ribbonKnotPoint.x,
-                y: StandingStageGeometry.ribbonKnotPoint.y + trolleyCompressionOffset
+    private var ribbonSource: some View {
+        Capsule()
+            .fill(HealthFirstStyle.orange.opacity(0.94))
+            .frame(width: 28, height: 5)
+            .modifier(
+                StandingFragmentTransferModifier(
+                    progress: snapshot.assembly.ribbonProgress,
+                    sourceCenter: StandingStageGeometry.ribbonSourceCenter,
+                    sourceGripPoint: StandingCollectionGeometry.sourceGrabPoint(
+                        for: .ribbon
+                    ),
+                    destinationCenter: StandingStageGeometry.ribbonKnotPoint,
+                    destinationGripPoint: StandingCollectionGeometry.destinationGrabPoint(
+                        for: .ribbon
+                    ),
+                    destinationScale: 0.68,
+                    reduceMotion: reduceMotion
+                )
             )
-        )
-        .trim(
-            from: 0,
-            to: reduceMotion ? 1 : eased(snapshot.assembly.ribbonProgress)
-        )
-        .stroke(
-            HealthFirstStyle.orange.opacity(0.63),
-            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
-        )
-        .opacity(
-            reduceMotion
-                ? eased(snapshot.assembly.ribbonProgress)
-                : 1
-        )
+            .zIndex(2)
     }
 
     private var standingTitleFragment: some View {
@@ -255,48 +293,65 @@ struct StandingAssemblyView: View {
                         lineWidth: 1.2
                     )
             }
-            .frame(width: 176, height: 52)
+            .frame(
+                width: StandingStageGeometry.backingSourceSize.width,
+                height: StandingStageGeometry.backingSourceSize.height
+            )
     }
 
-    @ViewBuilder
-    private func completionCard(for completion: StandingCompletionSnapshot) -> some View {
-        let position = completionCardPosition(for: completion)
-        let rotation = -7 * (1 - eased(completion.cardPlacementProgress))
-        let cardOpacity = reduceMotion
-            ? eased(completion.cardPlacementProgress)
-            : min(1, completion.elapsed / 0.08)
-
-        StandingCompletionCard()
-            .rotationEffect(.degrees(reduceMotion ? 0 : rotation))
-            .position(position)
-            .offset(
-                y: completion.cardIsPlaced
-                    ? trolleyCompressionOffset
-                    : 0
-            )
-            .opacity(cardOpacity)
-    }
-
-    private func completionCardPosition(
-        for completion: StandingCompletionSnapshot
-    ) -> CGPoint {
-        guard !reduceMotion else {
-            return StandingStageGeometry.completionCardDestination
-        }
-
-        if completion.cardPickupProgress < 1 {
-            return interpolate(
-                from: StandingStageGeometry.completionCardDockPoint,
-                to: StandingStageGeometry.completionCardPickupPoint,
-                progress: eased(completion.cardPickupProgress)
-            )
-        }
-
-        return interpolate(
-            from: StandingStageGeometry.completionCardPickupPoint,
-            to: StandingStageGeometry.completionCardDestination,
-            progress: eased(completion.cardPlacementProgress)
+    private func completionDock(for completion: StandingCompletionSnapshot) -> some View {
+        let pack = completion.dock
+        let travel = eased(pack.transferProgress)
+        let fold = standingSmoothedPhase(
+            pack.transferProgress,
+            from: 0.42,
+            to: 1
         )
+        let scaleX = interpolate(from: 1, to: 0.16, progress: fold)
+        let scaleY = interpolate(from: 1, to: 0.38, progress: fold)
+        let grip = interpolate(
+            from: StandingStageGeometry.completionDockGrabPoint,
+            to: StandingStageGeometry.completionDockDestinationGrabPoint,
+            progress: travel
+        )
+        let sourceGripOffset = CGPoint(
+            x: StandingStageGeometry.completionDockGrabPoint.x
+                - StandingStageGeometry.completionDockCenter.x,
+            y: StandingStageGeometry.completionDockGrabPoint.y
+                - StandingStageGeometry.completionDockCenter.y
+        )
+        let position = CGPoint(
+            x: grip.x - sourceGripOffset.x * scaleX,
+            y: grip.y - sourceGripOffset.y * scaleY
+        )
+
+        return StandingCompletionDock()
+            .scaleEffect(
+                x: reduceMotion ? 0.16 : scaleX,
+                y: reduceMotion ? 0.38 : scaleY
+            )
+            .rotationEffect(.degrees(reduceMotion ? 0 : 7 * fold))
+            .position(position)
+            .opacity(
+                reduceMotion
+                    ? 0
+                    : 1 - eased(pack.placementProgress)
+            )
+            .zIndex(2)
+    }
+
+    private func packedCompletionCard(
+        for completion: StandingCompletionSnapshot
+    ) -> some View {
+        StandingCompletionCard()
+            .position(StandingStageGeometry.completionCardDestination)
+            .offset(y: trolleyCompressionOffset)
+            .opacity(
+                reduceMotion
+                    ? 1
+                    : eased(completion.dock.placementProgress)
+            )
+            .zIndex(2)
     }
 
     private var trolleyCompressionOffset: CGFloat {
@@ -315,9 +370,125 @@ struct StandingAssemblyView: View {
         )
     }
 
+    private func interpolate(
+        from start: Double,
+        to end: Double,
+        progress: Double
+    ) -> CGFloat {
+        CGFloat(start + (end - start) * min(max(progress, 0), 1))
+    }
+
     private func eased(_ value: Double) -> Double {
         let value = min(max(value, 0), 1)
         return value * value * (3 - 2 * value)
+    }
+}
+
+/// The completion card material is a real animated stage prop shared by the
+/// live reminder and Motion Lab. It begins at the guide's exact last opacity,
+/// then stays still until the countdown dock has already been stored.
+struct StandingCompletionBackdropView: View {
+    let completion: StandingCompletionSnapshot
+    let chromeOpacity: Double
+    let reduceMotion: Bool
+
+    var body: some View {
+        Color.clear
+            .frame(
+                width: StandingStageGeometry.size.width,
+                height: StandingStageGeometry.size.height
+            )
+            .healthFirstCard(chromeOpacity: chromeOpacity)
+            .modifier(
+                StandingBackdropPackModifier(
+                    pack: completion.backdrop,
+                    reduceMotion: reduceMotion
+                )
+            )
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Treats the 420 x 280 material as a foldable map. Two non-overlapping folds
+/// preserve its lower-edge grip point while it travels into the trolley.
+private struct StandingBackdropPackModifier: ViewModifier {
+    let pack: StandingPackProgress
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        let transfer = eased(pack.transferProgress)
+        let firstFold = smoothedPhase(
+            pack.transferProgress,
+            from: 0.08,
+            to: 0.52
+        )
+        let secondFold = smoothedPhase(
+            pack.transferProgress,
+            from: 0.48,
+            to: 0.92
+        )
+        let scaleX = 1 - 0.88 * secondFold
+        let scaleY = 1 - 0.64 * firstFold - 0.28 * secondFold
+        let grip = interpolate(
+            from: StandingStageGeometry.completionBackdropGrabPoint,
+            to: StandingStageGeometry.completionBackdropDestinationGrabPoint,
+            progress: transfer
+        )
+        let sourceCenter = CGPoint(
+            x: StandingStageGeometry.size.width / 2,
+            y: StandingStageGeometry.size.height / 2
+        )
+        let sourceGripOffset = CGPoint(
+            x: StandingStageGeometry.completionBackdropGrabPoint.x
+                - sourceCenter.x,
+            y: StandingStageGeometry.completionBackdropGrabPoint.y
+                - sourceCenter.y
+        )
+        let position = CGPoint(
+            x: grip.x - sourceGripOffset.x * scaleX,
+            y: grip.y - sourceGripOffset.y * scaleY
+        )
+
+        content
+            .scaleEffect(
+                x: reduceMotion ? 0.12 : scaleX,
+                y: reduceMotion ? 0.08 : scaleY
+            )
+            .rotationEffect(
+                .degrees(reduceMotion ? 0 : -6 * secondFold)
+            )
+            .position(position)
+            .opacity(
+                reduceMotion
+                    ? 0
+                    : 1 - eased(pack.placementProgress)
+            )
+    }
+
+    private func smoothedPhase(
+        _ value: Double,
+        from start: Double,
+        to end: Double
+    ) -> Double {
+        guard end > start else { return value >= end ? 1 : 0 }
+        return eased(min(max((value - start) / (end - start), 0), 1))
+    }
+
+    private func eased(_ value: Double) -> Double {
+        let clamped = min(max(value, 0), 1)
+        return clamped * clamped * (3 - 2 * clamped)
+    }
+
+    private func interpolate(
+        from start: CGPoint,
+        to end: CGPoint,
+        progress: Double
+    ) -> CGPoint {
+        CGPoint(
+            x: start.x + (end.x - start.x) * progress,
+            y: start.y + (end.y - start.y) * progress
+        )
     }
 }
 
@@ -328,46 +499,75 @@ private struct StandingTrolleyView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            StandingTrolleyHandle()
-                .stroke(
-                    HealthFirstStyle.lavender.opacity(0.66),
-                    style: StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round)
-                )
-                .opacity(destinationOpacity(assembly.handleProgress))
-
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            Capsule()
                 .fill(
                     LinearGradient(
                         colors: [
-                            HealthFirstStyle.secondarySurface.opacity(0.88),
-                            HealthFirstStyle.lavender.opacity(0.22),
-                            Color.primary.opacity(0.06),
+                            HealthFirstStyle.lavender.opacity(0.72),
+                            Color.primary.opacity(0.34),
                         ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
                 )
+                .overlay {
+                    Capsule()
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 0.8)
+                }
+                .frame(width: 44, height: 6)
+                .position(x: 29, y: 43)
+                .opacity(destinationOpacity(assembly.baseProgress))
+
+            StandingTrolleyHandle()
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            HealthFirstStyle.lavender.opacity(0.94),
+                            Color.primary.opacity(0.72),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    style: StrokeStyle(lineWidth: 3.7, lineCap: .round, lineJoin: .round)
+                )
+                .opacity(destinationOpacity(assembly.chassisProgress))
+
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(HealthFirstStyle.secondarySurface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    HealthFirstStyle.lavender.opacity(0.42),
+                                    HealthFirstStyle.lavender.opacity(0.12),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                }
                 .overlay {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(
                             LinearGradient(
                                 colors: [
-                                    HealthFirstStyle.lavender.opacity(0.52),
-                                    Color.primary.opacity(0.24),
+                                    HealthFirstStyle.lavender.opacity(0.76),
+                                    Color.primary.opacity(0.40),
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 1.2
+                            lineWidth: 1.5
                         )
                 }
                 .overlay(alignment: .leading) {
                     HStack(spacing: 5) {
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
-                            .fill(Color.primary.opacity(0.18))
+                            .fill(Color.primary.opacity(0.28))
                             .frame(width: 13, height: 12)
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
-                            .fill(HealthFirstStyle.lavender.opacity(0.32))
+                            .fill(HealthFirstStyle.lavender.opacity(0.48))
                             .frame(width: 18, height: 12)
                     }
                     .padding(.leading, 9)
@@ -380,20 +580,20 @@ private struct StandingTrolleyView: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            Color.primary.opacity(0.58),
-                            HealthFirstStyle.lavender.opacity(0.72),
+                            Color.primary.opacity(0.80),
+                            HealthFirstStyle.lavender.opacity(0.92),
                         ],
                         startPoint: .leading,
                         endPoint: .trailing
                     ),
-                    style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round)
                 )
                 .opacity(destinationOpacity(assembly.chassisProgress))
 
             StandingRibbonKnot()
                 .stroke(
-                    HealthFirstStyle.orange.opacity(0.72),
-                    style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)
+                    HealthFirstStyle.orange.opacity(0.92),
+                    style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round)
                 )
                 .frame(width: 19, height: 14)
                 .position(x: 28, y: 2)
@@ -407,62 +607,64 @@ private struct StandingTrolleyView: View {
     }
 
     private func destinationOpacity(_ progress: Double) -> Double {
-        let progress = min(max(progress, 0), 1)
-        if reduceMotion {
-            return smoothstep(progress)
-        }
-        return smoothstep(min(max((progress - 0.70) / 0.30, 0), 1))
-    }
-
-    private func smoothstep(_ value: Double) -> Double {
-        value * value * (3 - 2 * value)
+        standingPlacementOpacity(progress)
     }
 }
 
 private struct StandingFragmentTransferModifier: ViewModifier {
     let progress: Double
-    let source: CGPoint
-    let waypoint: CGPoint
-    let destination: CGPoint
+    let sourceCenter: CGPoint
+    let sourceGripPoint: CGPoint
+    let destinationCenter: CGPoint
+    let destinationGripPoint: CGPoint
     let destinationScale: Double
-    let rotation: Double
     let reduceMotion: Bool
 
     func body(content: Content) -> some View {
         let progress = min(max(progress, 0), 1)
-        let easedProgress = smoothstep(progress)
-        let position = transferPosition(progress: easedProgress)
-        let travelOpacity = 1 - smoothstep(
-            min(max((progress - 0.72) / 0.28, 0), 1)
+        let pull = standingSmoothedPhase(
+            progress,
+            from: StandingCollectionTiming.gripEnd,
+            to: StandingCollectionTiming.pullEnd
+        )
+        let gripPosition = interpolate(
+            from: sourceGripPoint,
+            to: destinationGripPoint,
+            progress: pull
+        )
+        let scale = interpolate(
+            from: 1,
+            to: destinationScale,
+            // Keep the grabbed component recognizable during the pull. It
+            // folds down only beside the trolley instead of shrinking under
+            // the clamp as soon as the hand starts moving.
+            progress: standingSmoothedPhase(
+                progress,
+                from: 0.60,
+                to: StandingCollectionTiming.pullEnd
+            )
+        )
+        let sourceGripOffset = CGPoint(
+            x: sourceGripPoint.x - sourceCenter.x,
+            y: sourceGripPoint.y - sourceCenter.y
+        )
+        // SwiftUI scales the fragment around its centre. Derive its rendered
+        // grip offset from that exact scale so the visible edge remains under
+        // the clamp even while the fragment folds down near the trolley.
+        let renderedGripOffset = CGPoint(
+            x: sourceGripOffset.x * scale,
+            y: sourceGripOffset.y * scale
+        )
+        let position = CGPoint(
+            x: gripPosition.x - renderedGripOffset.x,
+            y: gripPosition.y - renderedGripOffset.y
         )
 
         content
-            .scaleEffect(
-                reduceMotion
-                    ? 1
-                    : 1 + (destinationScale - 1) * easedProgress
-            )
-            .rotationEffect(
-                .degrees(reduceMotion ? 0 : rotation * easedProgress)
-            )
-            .position(reduceMotion ? source : position)
-            .opacity(reduceMotion ? 1 - smoothstep(progress) : travelOpacity)
-    }
-
-    private func transferPosition(progress: Double) -> CGPoint {
-        if progress < 0.58 {
-            return interpolate(
-                from: source,
-                to: waypoint,
-                progress: progress / 0.58
-            )
-        }
-
-        return interpolate(
-            from: waypoint,
-            to: destination,
-            progress: (progress - 0.58) / 0.42
-        )
+            .scaleEffect(reduceMotion ? 1 : scale)
+            .position(reduceMotion ? sourceCenter : position)
+            .opacity(1 - standingPlacementOpacity(progress))
+            .accessibilityHidden(true)
     }
 
     private func interpolate(
@@ -476,8 +678,64 @@ private struct StandingFragmentTransferModifier: ViewModifier {
         )
     }
 
-    private func smoothstep(_ value: Double) -> Double {
-        value * value * (3 - 2 * value)
+    private func interpolate(
+        from start: Double,
+        to end: Double,
+        progress: Double
+    ) -> CGFloat {
+        CGFloat(start + (end - start) * progress)
+    }
+}
+
+private func standingPlacementOpacity(_ progress: Double) -> Double {
+    standingSmoothedPhase(
+        progress,
+        from: StandingCollectionTiming.pullEnd,
+        to: StandingCollectionTiming.placeEnd
+    )
+}
+
+private func standingSmoothedPhase(
+    _ value: Double,
+    from start: Double,
+    to end: Double
+) -> Double {
+    guard end > start else { return value >= end ? 1 : 0 }
+    let phase = min(max((value - start) / (end - start), 0), 1)
+    return phase * phase * (3 - 2 * phase)
+}
+
+/// Non-interactive last frame of the real standing safety dock. It occupies
+/// the same 222 pt footprint and shows the zero-second state, so rebuilding
+/// the hosting view at the completion boundary does not swap in a fake prop.
+private struct StandingCompletionDock: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ProgressView(value: 1)
+                .tint(HealthFirstStyle.orange)
+
+            HStack(spacing: 8) {
+                Text("还剩 0 秒")
+                    .font(.system(.title3, design: .rounded, weight: .semibold))
+                    .monospacedDigit()
+                Spacer(minLength: 4)
+                Text("先到这里")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 222)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(HealthFirstStyle.secondarySurface.opacity(0.94))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.primary.opacity(0.08))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -498,49 +756,14 @@ private struct StandingCompletionCard: View {
     }
 }
 
-private struct StandingRibbonPath: Shape {
-    let start: CGPoint
-    let end: CGPoint
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: start)
-        path.addCurve(
-            to: end,
-            control1: CGPoint(x: start.x - 20, y: start.y - 7),
-            control2: CGPoint(x: end.x + 24, y: end.y + 10)
-        )
-        return path
-    }
-}
-
 private struct StandingSourceRails: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let inset: CGFloat = 3
-        let cornerLength: CGFloat = 28
+        path.addRoundedRect(
+            in: rect.insetBy(dx: 1, dy: 1),
+            cornerSize: CGSize(width: 9, height: 9)
+        )
 
-        path.move(to: CGPoint(x: rect.minX + inset, y: rect.minY + cornerLength))
-        path.addLine(to: CGPoint(x: rect.minX + inset, y: rect.minY + inset))
-        path.addLine(to: CGPoint(x: rect.minX + cornerLength, y: rect.minY + inset))
-
-        path.move(to: CGPoint(x: rect.maxX - cornerLength, y: rect.minY + inset))
-        path.addLine(to: CGPoint(x: rect.maxX - inset, y: rect.minY + inset))
-        path.addLine(to: CGPoint(x: rect.maxX - inset, y: rect.minY + cornerLength))
-
-        path.move(to: CGPoint(x: rect.minX + inset, y: rect.maxY - cornerLength))
-        path.addLine(to: CGPoint(x: rect.minX + inset, y: rect.maxY - inset))
-        path.addLine(to: CGPoint(x: rect.minX + cornerLength, y: rect.maxY - inset))
-
-        path.move(to: CGPoint(x: rect.maxX - cornerLength, y: rect.maxY - inset))
-        path.addLine(to: CGPoint(x: rect.maxX - inset, y: rect.maxY - inset))
-        path.addLine(to: CGPoint(x: rect.maxX - inset, y: rect.maxY - cornerLength))
-
-        // A short joining rail crosses the transfer anchor. Without it the
-        // four decorative corners have an empty center, so the carry pose's
-        // clamp would visibly close around air at the hand waypoint.
-        path.move(to: CGPoint(x: rect.midX - 20, y: rect.midY))
-        path.addLine(to: CGPoint(x: rect.midX + 20, y: rect.midY))
         return path
     }
 }

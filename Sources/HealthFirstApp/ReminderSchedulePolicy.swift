@@ -251,6 +251,21 @@ struct ReminderSchedulePolicy: Sendable {
         )
     }
 
+    /// Removes a disabled reminder from a frozen schedule so a later guidance
+    /// or suspension restore cannot resurrect it.
+    func removing(
+        _ kind: ReminderKind,
+        from snapshot: ScheduleSnapshot
+    ) -> ScheduleSnapshot {
+        var deadlines = snapshot.deadlines
+        deadlines[kind] = nil
+        return ScheduleSnapshot(
+            deadlines: deadlines,
+            capturedAt: snapshot.capturedAt,
+            context: snapshot.context
+        )
+    }
+
     func intervalRemaining(
         in snapshot: ClockRebaseSnapshot
     ) -> [ReminderKind: TimeInterval] {
@@ -415,11 +430,27 @@ struct ReminderSchedulePolicy: Sendable {
         return date.addingTimeInterval(3 * 3_600)
     }
 
+    /// Re-homes an already-started automatic occurrence after it crosses the
+    /// workday boundary. Interval reminders remain the same occurrence and are
+    /// therefore due at the next start; quiet practice follows its calendar
+    /// cadence so it does not bunch up with the morning interval reminders.
+    func deferredOccurrenceDate(
+        for kind: ReminderKind,
+        after date: Date
+    ) -> Date {
+        switch kind {
+        case .eye, .standing:
+            nextDate(afterActiveWork: 0, resumingAt: date)
+        case .quietPractice:
+            nextQuietDate(after: date)
+        }
+    }
+
     func isWithinWorkday(_ date: Date) -> Bool {
         guard !calendar.isDateInWeekend(date) else { return false }
         let start = configuration.workdayStartHour
         let end = configuration.workdayEndHour
-        guard start < end else { return true }
+        guard start < end else { return false }
         let hour = calendar.component(.hour, from: date)
         return hour >= start && hour < end
     }

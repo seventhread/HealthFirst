@@ -66,6 +66,7 @@ enum ReminderCopy {
         stage: ReminderPresentationStage,
         tone: ReminderCopyTone,
         reminderID: UUID,
+        guideDuration: TimeInterval? = nil,
         snoozeDelay: TimeInterval = defaultSnoozeDelay
     ) -> ReminderPromptCopy {
         prompt(
@@ -73,6 +74,7 @@ enum ReminderCopy {
             stage: stage,
             tone: tone,
             seed: stableSeed(reminderID.uuidString),
+            guideDuration: guideDuration,
             snoozeDelay: snoozeDelay
         )
     }
@@ -82,6 +84,7 @@ enum ReminderCopy {
         stage: ReminderPresentationStage,
         tone: ReminderCopyTone,
         seed: UInt64,
+        guideDuration: TimeInterval? = nil,
         snoozeDelay: TimeInterval = defaultSnoozeDelay
     ) -> ReminderPromptCopy {
         let pool = promptPool(for: kind, tone: tone)
@@ -89,17 +92,27 @@ enum ReminderCopy {
         let salt = stableSeed("\(kind.rawValue)|\(stage.rawValue)|\(tone.rawValue)")
         let index = Int(mixed(seed ^ salt) % UInt64(candidates.count))
         let selected = candidates[index]
+        let resolvedDuration = resolvedGuideDuration(guideDuration, for: kind)
 
         return ReminderPromptCopy(
             kind: kind,
             stage: stage,
             tone: tone,
             eyebrow: eyebrow(for: stage),
-            title: selected.title,
-            message: selected.message,
+            title: applyingGuideDuration(
+                to: selected.title,
+                kind: kind,
+                duration: resolvedDuration
+            ),
+            message: applyingGuideDuration(
+                to: selected.message,
+                kind: kind,
+                duration: resolvedDuration
+            ),
             actions: actionLabels(
                 for: kind,
                 tone: tone,
+                guideDuration: resolvedDuration,
                 snoozeDelay: snoozeDelay
             )
         )
@@ -108,10 +121,14 @@ enum ReminderCopy {
     static func actionLabels(
         for kind: ReminderKind,
         tone: ReminderCopyTone,
+        guideDuration: TimeInterval? = nil,
         snoozeDelay: TimeInterval = defaultSnoozeDelay
     ) -> ReminderActionLabels {
-        let duration = durationText(kind.guideDuration)
+        let duration = durationText(
+            resolvedGuideDuration(guideDuration, for: kind)
+        )
         let later = durationText(snoozeDelay)
+        let snooze = "\(later)后提醒"
 
         let task: String = switch kind {
         case .eye:
@@ -126,28 +143,28 @@ enum ReminderCopy {
         case .gentle:
             return ReminderActionLabels(
                 start: "好，\(task)",
-                snooze: "\(later)后提醒我",
+                snooze: snooze,
                 skip: "这次先跳过",
                 endEarly: "先到这里"
             )
         case .dryHumor:
             return ReminderActionLabels(
                 start: "批准，\(task)",
-                snooze: "借我 \(later)",
+                snooze: snooze,
                 skip: "本次放过我",
                 endEarly: "提前收工"
             )
         case .sharp:
             return ReminderActionLabels(
                 start: "现在\(task)",
-                snooze: "\(later)，真的",
+                snooze: snooze,
                 skip: "本次跳过",
                 endEarly: "提前结束"
             )
         case .minimal:
             return ReminderActionLabels(
                 start: "开始 · \(duration)",
-                snooze: "稍后 \(later)",
+                snooze: snooze,
                 skip: "跳过",
                 endEarly: "结束"
             )
@@ -157,11 +174,16 @@ enum ReminderCopy {
     static func receipt(
         for kind: ReminderKind,
         outcome: ReminderReceiptOutcome,
-        tone: ReminderCopyTone
+        tone: ReminderCopyTone,
+        guideDuration: TimeInterval? = nil
     ) -> ReminderReceiptCopy {
         switch outcome {
         case .completed:
-            return completionReceipt(for: kind, tone: tone)
+            return completionReceipt(
+                for: kind,
+                tone: tone,
+                guideDuration: guideDuration
+            )
         case .snoozed(let delay):
             return snoozeReceipt(delay: delay, tone: tone)
         case .skipped:
@@ -531,9 +553,10 @@ private extension ReminderCopy {
 
     static func completionReceipt(
         for kind: ReminderKind,
-        tone: ReminderCopyTone
+        tone: ReminderCopyTone,
+        guideDuration: TimeInterval? = nil
     ) -> ReminderReceiptCopy {
-        let message: String = switch (kind, tone) {
+        let baseMessage: String = switch (kind, tone) {
         case (.eye, .gentle): "眼睛收到了这 20 秒的远方。"
         case (.eye, .dryHumor): "已与屏幕短暂解除绑定。"
         case (.eye, .sharp): "看吧，20 秒真的放得下。"
@@ -557,7 +580,11 @@ private extension ReminderCopy {
 
         return ReminderReceiptCopy(
             title: title,
-            message: message,
+            message: applyingGuideDuration(
+                to: baseMessage,
+                kind: kind,
+                duration: resolvedGuideDuration(guideDuration, for: kind)
+            ),
             dismissButton: "好"
         )
     }
@@ -631,6 +658,36 @@ private extension ReminderCopy {
             return "\(roundedSeconds / 60) 分钟"
         }
         return "\(roundedSeconds) 秒"
+    }
+
+    static func resolvedGuideDuration(
+        _ duration: TimeInterval?,
+        for kind: ReminderKind
+    ) -> TimeInterval {
+        guard let duration, duration.isFinite, duration > 0 else {
+            return kind.guideDuration
+        }
+        return duration
+    }
+
+    static func applyingGuideDuration(
+        to text: String,
+        kind: ReminderKind,
+        duration: TimeInterval
+    ) -> String {
+        let replacement = durationText(duration)
+        let tokens: [String] = switch kind {
+        case .eye:
+            ["20 秒"]
+        case .standing:
+            ["60 秒", "1 分钟", "一分钟"]
+        case .quietPractice:
+            ["30 秒", "半分钟"]
+        }
+
+        return tokens.reduce(text) { result, token in
+            result.replacingOccurrences(of: token, with: replacement)
+        }
     }
 
     /// FNV-1a gives us a stable seed unlike Swift's intentionally randomized

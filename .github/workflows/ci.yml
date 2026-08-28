@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and release build
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: Run tests
+        run: DEVELOPER_DIR="$(xcode-select -p)" swift test
+
+      - name: Build release app bundle
+        run: DEVELOPER_DIR="$(xcode-select -p)" Scripts/build-app.sh release
+
+      - name: Verify app bundle
+        run: |
+          test -x .build-app/HealthFirst.app/Contents/MacOS/HealthFirst
+          plutil -lint .build-app/HealthFirst.app/Contents/Info.plist
+          codesign --verify --deep --strict .build-app/HealthFirst.app

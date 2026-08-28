@@ -169,6 +169,15 @@ struct ProductionMascotView: View {
         }
 
         if motion == .guidingEye {
+            if shouldReduceMotion {
+                // Reduce Motion removes the morph, not the final companion.
+                // Hold the acknowledged smile, then switch once to the folded
+                // resting pose when the handoff timeline is complete.
+                let restingFrame: ProductionMascotFrame = normalizedActionProgress >= 1
+                    ? .folded
+                    : .smile
+                return frame == restingFrame ? 1 : 0
+            }
             return eyeHandoffOpacity(for: frame, progress: normalizedActionProgress)
         }
 
@@ -274,27 +283,32 @@ struct ProductionMascotView: View {
         }
 
         let elapsed = CGFloat(min(max(progress, 0), 1)) * 60
+        let titleStart = CGFloat(StandingBeat.title.startSeconds)
+        let titleEnd = CGFloat(StandingBeat.title.endSeconds)
+        let backingStart = CGFloat(StandingBeat.backing.startSeconds)
+        let backingEnd = CGFloat(StandingBeat.backing.endSeconds)
+        let railsStart = CGFloat(StandingBeat.rails.startSeconds)
+        let railsEnd = CGFloat(StandingBeat.rails.endSeconds)
+        let ribbonStart = CGFloat(StandingBeat.ribbon.startSeconds)
         switch elapsed {
         case ..<0.35:
             return (.inspect, min(0.5, elapsed / 0.7))
-        case ..<7.75:
+        case ..<(titleStart - 0.25):
             return (.inspect, 0.5)
-        case ..<8:
-            return (.inspect, 0.5 + (elapsed - 7.75) * 2)
-        case ..<8.6:
-            return (.lift, (elapsed - 8) / 0.6)
-        case ..<22:
-            return (.idle, 1)
-        case ..<22.6:
-            return (.carry, (elapsed - 22) / 0.6)
-        case ..<38:
-            return (.idle, 1)
-        case ..<38.6:
-            return (.carry, (elapsed - 38) / 0.6)
-        case ..<52:
-            return (.idle, 1)
-        case ..<52.6:
-            return (.cartHold, (elapsed - 52) / 0.6)
+        case ..<titleStart:
+            return (.inspect, 0.5 + (elapsed - (titleStart - 0.25)) * 2)
+        case ..<titleEnd:
+            return (.lift, (elapsed - titleStart) / CGFloat(StandingBeat.duration))
+        case ..<backingStart:
+            return (.cartHold, 1)
+        case ..<backingEnd:
+            return (.carry, (elapsed - backingStart) / CGFloat(StandingBeat.duration))
+        case ..<railsStart:
+            return (.cartHold, 1)
+        case ..<railsEnd:
+            return (.carry, (elapsed - railsStart) / CGFloat(StandingBeat.duration))
+        case ..<ribbonStart:
+            return (.cartHold, 1)
         default:
             // Guidance stays neutral through the deadline. The completion
             // receipt owns the one-shot smile after the final card is placed.
@@ -326,15 +340,16 @@ struct ProductionMascotView: View {
                 for: frame,
                 pose: .standingLift,
                 enterBase: .standingInspect,
-                exitBase: .neutral,
+                exitBase: .standingCartHold,
                 progress: standing.progress
             )
 
         case .carry:
-            return shortBeatOpacity(
+            return splitBeatOpacity(
                 for: frame,
                 pose: .standingCarry,
-                base: .neutral,
+                enterBase: .standingCartHold,
+                exitBase: .standingCartHold,
                 progress: standing.progress
             )
 
@@ -384,11 +399,10 @@ struct ProductionMascotView: View {
         base: ProductionMascotFrame,
         progress: CGFloat
     ) -> Double {
-        // The standing milestones last 0.6 s. Limit full-body dissolves to
-        // roughly 84 ms so they read as a single motion-blur beat instead of
-        // leaving two independent sets of hose arms on screen.
-        let enter = ramp(progress, from: 0, to: 0.14)
-        let exit = ramp(progress, from: 0.86, to: 1)
+        // Keep full-body dissolves short so the extended arm reads as one
+        // reach rather than two overlapping mascots.
+        let enter = ramp(progress, from: 0, to: 0.10)
+        let exit = ramp(progress, from: 0.54, to: 0.64)
         if frame == base { return Double(max(1 - enter, exit)) }
         if frame == pose { return Double(enter * (1 - exit)) }
         return 0
@@ -401,8 +415,11 @@ struct ProductionMascotView: View {
         exitBase: ProductionMascotFrame,
         progress: CGFloat
     ) -> Double {
-        let enter = ramp(progress, from: 0, to: 0.14)
-        let exit = ramp(progress, from: 0.86, to: 1)
+        let enter = ramp(progress, from: 0, to: 0.10)
+        let exit = ramp(progress, from: 0.54, to: 0.64)
+        if enterBase == exitBase, frame == enterBase {
+            return Double(max(1 - enter, exit))
+        }
         if frame == enterBase { return Double(1 - enter) }
         if frame == pose { return Double(enter * (1 - exit)) }
         if frame == exitBase { return Double(exit) }
@@ -417,8 +434,11 @@ struct ProductionMascotView: View {
         for frame: ProductionMascotFrame,
         progress: CGFloat
     ) -> Double {
-        let uprightToHalf = ramp(progress, from: 0, to: 0.28)
-        let halfToFold = ramp(progress, from: 0.72, to: 1)
+        // Keep each whole-body dissolve close to 110 ms. Most of the longer
+        // handoff is a readable hold on the half-folded key pose, avoiding the
+        // duplicate arms that a slow blend of complete raster poses creates.
+        let uprightToHalf = ramp(progress, from: 0, to: 0.10)
+        let halfToFold = ramp(progress, from: 0.90, to: 1)
         switch frame {
         case .smile:
             return Double(1 - uprightToHalf)

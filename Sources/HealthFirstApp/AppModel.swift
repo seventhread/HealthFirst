@@ -16,6 +16,41 @@ enum PanelReceipt: Equatable {
     }
 }
 
+/// Receipt panels are passive companion toasts. Completion waits for any
+/// action-specific outro, then leaves the speech bubble readable for the same
+/// short interval as every other result.
+enum PanelReceiptPresentationPolicy {
+    static let bubbleDisplayDuration: TimeInterval = 3.6
+
+    static func displayDuration(
+        for receipt: PanelReceipt,
+        kind: ReminderKind?,
+        reduceMotion: Bool
+    ) -> TimeInterval {
+        if receipt == .completed, kind == .standing, !reduceMotion {
+            return StandingCompletionTimeline.duration + bubbleDisplayDuration
+        }
+        return bubbleDisplayDuration
+    }
+
+    static func dismissalDeadline(
+        at date: Date,
+        voiceOverEnabled: Bool,
+        displayDuration: TimeInterval
+    ) -> Date? {
+        voiceOverEnabled
+            ? nil
+            : date.addingTimeInterval(displayDuration)
+    }
+
+    static func allowsMouseInteraction(
+        hasReceipt: Bool,
+        voiceOverEnabled: Bool
+    ) -> Bool {
+        !hasReceipt || voiceOverEnabled
+    }
+}
+
 enum PanelExitAnimation: Equatable {
     case retry(ReminderKind)
     case queued(ReminderKind)
@@ -33,14 +68,59 @@ enum PanelExitAnimation: Equatable {
     }
 }
 
+/// Business decisions that must stay independent from panel animations.  The
+/// live model uses these predicates before mutating presentation state, while
+/// unit tests can exercise the boundary cases without opening an AppKit panel.
+enum ReminderRuntimePolicy {
+    static func usesSeriousPresentation(
+        _ reminder: ReminderInstance?
+    ) -> Bool {
+        guard let reminder, reminder.mode == .serious else { return false }
+        return switch reminder.state {
+        case .seriousPresented, .guided:
+            true
+        default:
+            false
+        }
+    }
+
+    static func shouldDeferOutsideWorkday(
+        reminder: ReminderInstance?,
+        isManual: Bool,
+        isWithinWorkday: Bool
+    ) -> Bool {
+        reminder != nil && !isManual && !isWithinWorkday
+    }
+
+    static func shouldDiscardActiveReminder(
+        of kind: ReminderKind,
+        reminder: ReminderInstance?,
+        isManual: Bool
+    ) -> Bool {
+        reminder?.kind == kind && !isManual
+    }
+
+    static func shouldDiscardExitAnimation(
+        of kind: ReminderKind,
+        animation: PanelExitAnimation?,
+        isManual: Bool
+    ) -> Bool {
+        animation?.kind == kind && !isManual
+    }
+}
+
 private struct RuntimeSettings: Equatable {
     var eyeEnabled: Bool
     var eyeIntervalMinutes: Int
+    var eyeGuideDurationSeconds: Int
     var standingEnabled: Bool
     var standingIntervalMinutes: Int
+    var standingGuideDurationSeconds: Int
     var quietEnabled: Bool
     var quietDailyCount: Int
+    var quietGuideDurationSeconds: Int
     var seriousMode: Bool
+    var soundEnabled: Bool
     var workdayStartHour: Int
     var workdayEndHour: Int
 }
@@ -93,15 +173,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastError: String?
 
     private let panelController = ReminderPanelController()
+    private let settingsStore: UserDefaults
+    private let runtimeStateStore: AppRuntimeStateStore
+    private let reminderSoundPlayer: ReminderSoundPlayer
     private var tickTask: Task<Void, Never>?
     private var autoDismissAt: Date?
     private var remainingAutoDismiss: TimeInterval?
     private var receiptDismissAt: Date?
+    private var receiptVoiceOverEnabled: Bool?
     private var exitAnimationDismissAt: Date?
     private var remainingReceiptDismiss: TimeInterval?
     private var remainingExitAnimationDismiss: TimeInterval?
     private var clockSuspensionStartedAt: Date?
     private var manualPauseIntent: ManualPauseIntent?
+    private var manualPauseStartedAt: Date?
     private var wallClockJumpDetector = WallClockJumpDetector()
     private var systemInactivity = SystemInactivityTracker<ClockSuspensionReason>()
     // Dates placed on a later workday cannot reveal whether they represent a
@@ -122,11 +207,20 @@ final class AppModel: ObservableObject {
     private var schedulingCalendar: Calendar
     private var lastSettings: RuntimeSettings
     private var activeIsManual = false
+    private var lastSavedRuntimeSnapshot: AppRuntimeSnapshot?
 
-    init() {
-        Self.registerDefaults()
+    init(
+        settingsStore: UserDefaults = .standard,
+        runtimeStateStore: AppRuntimeStateStore? = nil,
+        startsTicking: Bool = true
+    ) {
+        self.settingsStore = settingsStore
+        self.runtimeStateStore = runtimeStateStore
+            ?? AppRuntimeStateStore(defaults: settingsStore)
+        reminderSoundPlayer = ReminderSoundPlayer()
+        Self.registerDefaults(in: settingsStore)
         schedulingCalendar = Calendar.current
-        lastSettings = Self.readSettings()
+        lastSettings = Self.readSettings(in: settingsStore)
         let launchContinuousInstant = ContinuousClock.now
         let launchDate = Date()
         now = launchDate
@@ -134,25 +228,36 @@ final class AppModel: ObservableObject {
             wallDate: launchDate,
             continuousInstant: launchContinuousInstant
         )
-        rebuildSchedule(from: launchDate)
+        if let snapshot = self.runtimeStateStore.load() {
+            restoreRuntimeState(snapshot, at: launchDate)
+        } else {
+            rebuildSchedule(from: launchDate)
+        }
         panelController.setKeyStateHandler { [weak self] hasFocus in
             self?.setPanelKeyboardFocus(hasFocus)
         }
         installWorkspaceSuspensionObservers()
         installSystemTimeObservers()
 
-        tickTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard let self else { return }
-                let continuousInstant = ContinuousClock.now
-                let wallDate = Date()
-                self.tick(
-                    at: wallDate,
-                    continuousInstant: continuousInstant
-                )
+        if startsTicking {
+            tickTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard let self else { return }
+                    let continuousInstant = ContinuousClock.now
+                    let wallDate = Date()
+                    self.tick(
+                        at: wallDate,
+                        continuousInstant: continuousInstant
+                    )
+                }
             }
         }
+
+        if startsTicking {
+            restorePresentationIfNeeded(at: launchDate)
+        }
+        persistRuntimeStateIfNeeded(at: launchDate)
     }
 
     deinit {
@@ -195,23 +300,46 @@ final class AppModel: ObservableObject {
         return pausedUntil > now
     }
 
+    var isWithinConfiguredWorkday: Bool {
+        reminderSchedulePolicy.isWithinWorkday(now)
+    }
+
+    var canStartManualPause: Bool {
+        canStartManualPause(at: now)
+    }
+
     var copyTone: ReminderCopyTone {
-        let rawValue = UserDefaults.standard.string(forKey: SettingsKey.copyTone)
+        let rawValue = settingsStore.string(forKey: SettingsKey.copyTone)
         return ReminderCopyTone(rawValue: rawValue ?? "") ?? .gentle
+    }
+
+    func configuredGuideDuration(for kind: ReminderKind) -> TimeInterval {
+        let seconds: Int = switch kind {
+        case .eye:
+            lastSettings.eyeGuideDurationSeconds
+        case .standing:
+            lastSettings.standingGuideDurationSeconds
+        case .quietPractice:
+            lastSettings.quietGuideDurationSeconds
+        }
+        return TimeInterval(max(1, seconds))
     }
 
     func triggerPreview(_ kind: ReminderKind) {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard canTriggerPreview else { return }
 
         receipt = nil
         receiptStartedAt = nil
         receiptDismissAt = nil
+        receiptVoiceOverEnabled = nil
         lastError = nil
         var reminder = ReminderInstance(
             kind: kind,
             dueAt: eventDate,
-            mode: lastSettings.seriousMode ? .serious : .standard
+            mode: lastSettings.seriousMode ? .serious : .standard,
+            guideDuration: configuredGuideDuration(for: kind)
         )
         do {
             try reminder.send(.deadlineReached, at: eventDate)
@@ -226,13 +354,15 @@ final class AppModel: ObservableObject {
 #if DEBUG
     func triggerSeriousPreview(_ kind: ReminderKind = .standing) {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard canTriggerPreview else { return }
 
         var reminder = ReminderInstance(
             kind: kind,
             dueAt: eventDate,
             mode: .serious,
-            retryDelay: 0
+            retryDelay: 0,
+            guideDuration: configuredGuideDuration(for: kind)
         )
         do {
             try reminder.send(.deadlineReached, at: eventDate)
@@ -249,7 +379,8 @@ final class AppModel: ObservableObject {
 #endif
 
     func openPendingReminder() {
-        _ = observeCurrentWallClock()
+        let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard activeReminder == nil,
               receipt == nil,
               exitAnimation == nil,
@@ -347,46 +478,46 @@ final class AppModel: ObservableObject {
     }
 
     private func updatePanelInteractionPause() {
+        // Receipts own an absolute, passive-toast deadline. In particular,
+        // VoiceOver may keep the panel interactive for its close action, but
+        // pointer hover or keyboard focus must never turn that into a paused
+        // timer. VoiceOver receipts already opt out of automatic dismissal.
+        guard receipt == nil else { return }
+
         if panelIsHovered || panelHasKeyboardFocus {
             if let autoDismissAt {
                 remainingAutoDismiss = max(0, autoDismissAt.timeIntervalSince(now))
                 self.autoDismissAt = nil
-            }
-            if let receiptDismissAt {
-                remainingReceiptDismiss = max(0, receiptDismissAt.timeIntervalSince(now))
-                self.receiptDismissAt = nil
             }
         } else if clockSuspensionStartedAt == nil {
             if let remainingAutoDismiss {
                 autoDismissAt = now.addingTimeInterval(remainingAutoDismiss)
                 self.remainingAutoDismiss = nil
             }
-            if let remainingReceiptDismiss {
-                receiptDismissAt = now.addingTimeInterval(remainingReceiptDismiss)
-                self.remainingReceiptDismiss = nil
-            }
         }
     }
 
     func pause(for duration: TimeInterval) {
-        _ = observeCurrentWallClock()
+        let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
+        guard canStartManualPause(at: eventDate) else { return }
         beginPause(
-            until: now.addingTimeInterval(duration),
+            until: eventDate.addingTimeInterval(duration),
             intent: .duration
         )
     }
 
     func pauseUntilTomorrow() {
-        _ = observeCurrentWallClock()
+        let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
+        guard canStartManualPause(at: eventDate) else { return }
         let calendar = schedulingCalendar
         let tomorrow = calendar.date(
             byAdding: .day,
             value: 1,
-            to: now
-        ) ?? now.addingTimeInterval(86_400)
-        let hour = UserDefaults.standard.integer(
-            forKey: SettingsKey.workdayStartHour
-        )
+            to: eventDate
+        ) ?? eventDate.addingTimeInterval(86_400)
+        let hour = lastSettings.workdayStartHour
         let until = calendar.date(
             bySettingHour: hour,
             minute: 0,
@@ -401,13 +532,22 @@ final class AppModel: ObservableObject {
         )
     }
 
+    private func canStartManualPause(at date: Date) -> Bool {
+        pausedUntil == nil
+            && clockSuspensionStartedAt == nil
+            && !systemInactivity.isInactive
+            && reminderSchedulePolicy.isWithinWorkday(date)
+    }
+
     func resume() {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         endPause(at: eventDate, userInitiated: true)
     }
 
     func dismissReceipt() {
-        _ = observeCurrentWallClock()
+        let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         finishReceipt()
     }
 
@@ -561,6 +701,7 @@ final class AppModel: ObservableObject {
         clockSuspensionStartedAt = clockSuspensionStartedAt?.addingTimeInterval(
             offset
         )
+        manualPauseStartedAt = manualPauseStartedAt?.addingTimeInterval(offset)
         systemInactivity.rebaseWallClock(by: offset)
 
         if let suspendedSchedule {
@@ -592,6 +733,7 @@ final class AppModel: ObservableObject {
         at date: Date,
         continuousInstant: ContinuousClock.Instant
     ) {
+        defer { persistRuntimeStateIfNeeded(at: date) }
         observeWallClock(
             at: date,
             continuousInstant: continuousInstant
@@ -601,38 +743,59 @@ final class AppModel: ObservableObject {
             endPause(at: date, userInitiated: false)
         }
 
+        let settings = Self.readSettings(in: settingsStore)
+        if settings != lastSettings,
+           guidanceSchedule != nil || clockSuspensionStartedAt != nil {
+            applyImmediateDisableChanges(
+                current: settings,
+                at: date
+            )
+        }
+
         // Manual pause, sleep, display sleep, and lock-screen intervals all
         // share one clock freeze. `isPaused` intentionally remains the public
         // manual-pause state used by the menu bar.
         guard clockSuspensionStartedAt == nil else { return }
 
-        // Defer settings reconciliation while the clock or reminder schedule
-        // is frozen. Otherwise changing an interval mid-pause/mid-guidance
-        // would create a new wall-clock due and then overwrite it with the
-        // captured remaining time. The first tick after either flow finishes
-        // reconciles once from its real resume date.
-        let settings = Self.readSettings()
-        if settings != lastSettings, guidanceSchedule == nil {
-            let previousSettings = lastSettings
-            lastSettings = settings
-            reconcileSchedule(
-                previous: previousSettings,
-                current: settings,
-                from: date
-            )
+        // Interval/cadence edits remain deferred while guidance owns a frozen
+        // schedule, but disabling a kind is safety-critical and takes effect
+        // immediately. The remaining edits reconcile once guidance finishes.
+        if settings != lastSettings {
+            if guidanceSchedule != nil {
+                applyImmediateDisableChanges(
+                    current: settings,
+                    at: date
+                )
+            }
+
+            if guidanceSchedule == nil, settings != lastSettings {
+                let previousSettings = lastSettings
+                lastSettings = settings
+                reconcileSchedule(
+                    previous: previousSettings,
+                    current: settings,
+                    from: date
+                )
+            }
         }
 
         expireStaleQuietReminders(at: date)
+
+        // Scheduled occurrences never advance beyond the configured workday.
+        // If a visible/retrying occurrence crosses the boundary, put it back
+        // on the next work period before evaluating any UI or state deadline.
+        // User-triggered previews deliberately keep their existing lifecycle.
+        if deferAutomaticPresentationOutsideWorkdayIfNeeded(at: date) {
+            return
+        }
 
         if let exitAnimationDismissAt, exitAnimationDismissAt <= date {
             finishExitAnimation()
             return
         }
 
-        if let receiptDismissAt, receiptDismissAt <= date {
-            finishReceipt()
-            return
-        }
+        synchronizeReceiptAccessibilityIfNeeded(at: date)
+        if finishExpiredReceiptIfNeeded(at: date) { return }
 
         // A visible receipt is modal presentation state. In particular,
         // VoiceOver receipts have no automatic timeout; do not advance a
@@ -678,7 +841,8 @@ final class AppModel: ObservableObject {
         var reminder = ReminderInstance(
             kind: due.key,
             dueAt: due.value,
-            mode: lastSettings.seriousMode ? .serious : .standard
+            mode: lastSettings.seriousMode ? .serious : .standard,
+            guideDuration: configuredGuideDuration(for: due.key)
         )
         do {
             try reminder.send(.deadlineReached, at: date)
@@ -696,6 +860,7 @@ final class AppModel: ObservableObject {
         completion: (ReminderState) -> Void
     ) {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard var reminder = activeReminder else { return }
         guard receipt == nil else { return }
 
@@ -759,12 +924,14 @@ final class AppModel: ObservableObject {
 
         pausedUntil = until
         manualPauseIntent = intent
+        manualPauseStartedAt = now
         beginClockSuspensionIfNeeded(at: now)
     }
 
     private func endPause(at date: Date, userInitiated: Bool) {
         pausedUntil = nil
         manualPauseIntent = nil
+        manualPauseStartedAt = nil
         finishClockSuspensionIfPossible(at: date, userInitiated: userInitiated)
     }
 
@@ -905,6 +1072,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Keeps passive receipt expiry deterministic and independent from hover
+    /// state. The regular clock calls this every tick; tests can exercise the
+    /// same deadline boundary without waiting in real time.
+    @discardableResult
+    func finishExpiredReceiptIfNeeded(at date: Date) -> Bool {
+        guard let receiptDismissAt, receiptDismissAt <= date else {
+            return false
+        }
+        finishReceipt()
+        return true
+    }
+
     private func restoreGuidanceSchedule(at date: Date) {
         guard let guidanceSchedule else { return }
         nextDue = reminderSchedulePolicy.restore(
@@ -1042,6 +1221,7 @@ final class AppModel: ObservableObject {
         receipt = nil
         receiptStartedAt = nil
         receiptDismissAt = nil
+        receiptVoiceOverEnabled = nil
         remainingReceiptDismiss = nil
         autoDismissAt = nil
         remainingAutoDismiss = nil
@@ -1215,11 +1395,22 @@ final class AppModel: ObservableObject {
                     )
                 }
             },
+            notificationCenter.addObserver(
+                forName: NSApplication.willTerminateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.persistRuntimeStateIfNeeded(at: Date())
+                }
+            },
         ])
     }
 
     private func beginSystemSuspension(_ reason: ClockSuspensionReason) {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard !systemInactivity.contains(reason) else { return }
         beginClockSuspensionIfNeeded(at: eventDate)
         systemInactivity.begin(reason, at: eventDate)
@@ -1227,11 +1418,13 @@ final class AppModel: ObservableObject {
 
     private func endSystemSuspension(_ reason: ClockSuspensionReason) {
         let eventDate = observeCurrentWallClock()
+        defer { persistRuntimeStateIfNeeded(at: eventDate) }
         guard systemInactivity.end(reason, at: eventDate) else { return }
 
         if let pausedUntil, pausedUntil <= eventDate {
             self.pausedUntil = nil
             manualPauseIntent = nil
+            manualPauseStartedAt = nil
         }
         finishClockSuspensionIfPossible(at: eventDate, userInitiated: false)
     }
@@ -1250,26 +1443,37 @@ final class AppModel: ObservableObject {
         showPanel(userInitiated: userInitiated)
         updatePanelInteractionPause()
 
+        if ReminderSoundPolicy.shouldPlay(
+            isEnabled: lastSettings.soundEnabled,
+            userInitiated: userInitiated,
+            state: activeReminder?.state
+        ) {
+            reminderSoundPlayer.play()
+        }
+
         if !userInitiated {
             announceCurrentReminder()
         }
     }
 
     private func showPanel(userInitiated: Bool) {
-        let isSerious: Bool
-        if case .seriousPresented = activeReminder?.state {
-            isSerious = true
-        } else {
-            isSerious = false
-        }
+        let isSerious = ReminderRuntimePolicy.usesSeriousPresentation(
+            activeReminder
+        )
 
+        let voiceOverEnabled = NSWorkspace.shared.isVoiceOverEnabled
         let shouldTakeFocus = userInitiated
             || isSerious
-            || NSWorkspace.shared.isVoiceOverEnabled
+            || voiceOverEnabled
 
         panelController.show(
             presentation: isSerious ? .serious : .compact,
             userInitiated: shouldTakeFocus,
+            allowsMouseInteraction: PanelReceiptPresentationPolicy
+                .allowsMouseInteraction(
+                    hasReceipt: receipt != nil,
+                    voiceOverEnabled: voiceOverEnabled
+                ),
             seriousEmergencyAction: { [weak self] in
                 self?.emergencySkip()
             }
@@ -1299,12 +1503,23 @@ final class AppModel: ObservableObject {
     private func showReceipt(_ nextReceipt: PanelReceipt, keepReminder: Bool) {
         receipt = nextReceipt
         receiptStartedAt = now
+        // A passive receipt no longer receives hover events. Clear any state
+        // inherited from the interactive prompt before switching the panel to
+        // mouse-through mode.
+        panelIsHovered = false
+        panelHasKeyboardFocus = false
         remainingReceiptDismiss = nil
-        receiptDismissAt = NSWorkspace.shared.isVoiceOverEnabled
-            ? nil
-            : now.addingTimeInterval(receiptDisplayDuration(nextReceipt))
+        let voiceOverEnabled = NSWorkspace.shared.isVoiceOverEnabled
+        receiptVoiceOverEnabled = voiceOverEnabled
+        receiptDismissAt = PanelReceiptPresentationPolicy.dismissalDeadline(
+            at: now,
+            voiceOverEnabled: voiceOverEnabled,
+            displayDuration: receiptDisplayDuration(nextReceipt)
+        )
         autoDismissAt = nil
-        showPanel(userInitiated: nextReceipt != .completed)
+        // Results are passive toasts: they should not reactivate the app or
+        // steal keyboard focus from the work the reminder just interrupted.
+        showPanel(userInitiated: false)
         updatePanelInteractionPause()
 
         if let reminder = activeReminder,
@@ -1331,6 +1546,9 @@ final class AppModel: ObservableObject {
         remainingReceiptDismiss = nil
         receipt = nil
         receiptStartedAt = nil
+        receiptVoiceOverEnabled = nil
+        panelIsHovered = false
+        panelHasKeyboardFocus = false
         panelController.dismiss()
 
         guard let reminder = activeReminder else { return }
@@ -1341,12 +1559,35 @@ final class AppModel: ObservableObject {
     }
 
     private func receiptDisplayDuration(_ receipt: PanelReceipt) -> TimeInterval {
-        switch receipt {
-        case .completed:
-            6.5
-        case .snoozed, .skipped, .endedEarly, .emergencySkipped:
-            5.0
+        PanelReceiptPresentationPolicy.displayDuration(
+            for: receipt,
+            kind: activeReminder?.kind,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
+    }
+
+    private func synchronizeReceiptAccessibilityIfNeeded(at date: Date) {
+        guard let receipt else {
+            receiptVoiceOverEnabled = nil
+            return
         }
+
+        let voiceOverEnabled = NSWorkspace.shared.isVoiceOverEnabled
+        guard voiceOverEnabled != receiptVoiceOverEnabled else { return }
+
+        receiptVoiceOverEnabled = voiceOverEnabled
+        remainingReceiptDismiss = nil
+        receiptDismissAt = PanelReceiptPresentationPolicy.dismissalDeadline(
+            at: date,
+            voiceOverEnabled: voiceOverEnabled,
+            displayDuration: receiptDisplayDuration(receipt)
+        )
+
+        // VoiceOver can be switched while a toast is visible. Re-hosting the
+        // same lightweight view updates its accessibility hint and switches
+        // the panel between keyboard-accessible and click-through behavior.
+        showPanel(userInitiated: false)
+        updatePanelInteractionPause()
     }
 
     private func beginExitAnimation(
@@ -1384,6 +1625,246 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func restoreRuntimeState(
+        _ snapshot: AppRuntimeSnapshot,
+        at date: Date
+    ) {
+        lastSavedRuntimeSnapshot = snapshot
+        nextDue = snapshot.nextDue.filter { isReminderEnabled($0.key) }
+        deferredIntervalRemaining = snapshot.deferredIntervalRemaining.filter {
+            isReminderEnabled($0.key)
+        }
+
+        for kind in [ReminderKind.eye, .standing] {
+            guard let due = nextDue[kind] else { continue }
+            if deferredIntervalRemaining[kind] == nil {
+                deferredIntervalRemaining[kind] = min(
+                    intervalDuration(for: kind) ?? 0,
+                    max(0, due.timeIntervalSince(date))
+                )
+            }
+        }
+
+        pendingReminders = []
+        for reminder in snapshot.pendingReminders
+            where isReminderEnabled(reminder.kind) {
+            if case .pendingInMenuBar = reminder.state {
+                appendOrReplacePending(reminder)
+            }
+        }
+
+        activeReminder = nil
+        activeIsManual = false
+        if var reminder = snapshot.activeReminder,
+           snapshot.activeIsManual || isReminderEnabled(reminder.kind) {
+            do {
+                let pauseStart = snapshot.pauseStartedAt ?? snapshot.savedAt
+                let pausedElapsed: TimeInterval
+                if let pauseEnd = snapshot.pausedUntil {
+                    pausedElapsed = max(
+                        0,
+                        min(date, pauseEnd).timeIntervalSince(pauseStart)
+                    )
+                } else {
+                    pausedElapsed = 0
+                }
+                let closureDelay: TimeInterval
+                if case .guided = reminder.state, snapshot.pausedUntil == nil {
+                    closureDelay = max(0, date.timeIntervalSince(snapshot.savedAt))
+                } else {
+                    closureDelay = 0
+                }
+                let activeClockDelay = max(pausedElapsed, closureDelay)
+
+                if case .guided(let startedAt, _) = reminder.state {
+                    guidanceSchedule = reminderSchedulePolicy.captureForGuidance(
+                        nextDue: nextDue,
+                        deferredIntervalRemaining: deferredIntervalRemaining,
+                        at: startedAt
+                    )
+                }
+                if activeClockDelay > 0, !reminder.state.isTerminal {
+                    try reminder.send(.delay(by: activeClockDelay), at: date)
+                }
+
+                switch reminder.state {
+                case .scheduled(let dueAt):
+                    if isReminderEnabled(reminder.kind) {
+                        setNextDue(dueAt, for: reminder.kind)
+                    }
+
+                case .firstPresented where !snapshot.activeIsManual:
+                    // Closing the app is equivalent to not responding, but a
+                    // relaunch should not immediately throw the same panel in
+                    // front of the user. Resume at the normal three-minute
+                    // retry boundary.
+                    try reminder.send(.noResponse, at: date)
+                    activeReminder = reminder
+
+                case .followUpPresented, .seriousPresented:
+                    try reminder.send(.noResponse, at: date)
+                    if case .pendingInMenuBar = reminder.state {
+                        appendOrReplacePending(reminder)
+                    }
+
+                case .pendingInMenuBar:
+                    appendOrReplacePending(reminder)
+
+                case .guided:
+                    activeReminder = reminder
+                    activeIsManual = snapshot.activeIsManual
+
+                case .retryPending, .snoozed:
+                    activeReminder = reminder
+                    activeIsManual = snapshot.activeIsManual
+
+                case .firstPresented:
+                    // A manual preview is disposable. Persisting it would make
+                    // reopening the app look like a real scheduled reminder.
+                    break
+
+                case .completed, .skipped, .emergencySkip:
+                    break
+                }
+            } catch {
+                lastError = "无法恢复上次提醒：\(error)"
+                activeReminder = nil
+                activeIsManual = false
+            }
+        }
+
+        ensureScheduleCoverage(after: date)
+
+        if let restoredPause = snapshot.pausedUntil, restoredPause > date {
+            pausedUntil = restoredPause
+            manualPauseIntent = .duration
+            manualPauseStartedAt = snapshot.pauseStartedAt ?? snapshot.savedAt
+            restoreManualPauseSuspension(
+                startedAt: snapshot.pauseStartedAt ?? snapshot.savedAt,
+                at: date
+            )
+        } else {
+            pausedUntil = nil
+            manualPauseIntent = nil
+            manualPauseStartedAt = nil
+            if snapshot.pausedUntil != nil {
+                restoreExpiredManualPause(
+                    startedAt: snapshot.pauseStartedAt ?? snapshot.savedAt,
+                    at: date
+                )
+            }
+        }
+    }
+
+    private func restorePresentationIfNeeded(at date: Date) {
+        guard pausedUntil == nil,
+              let reminder = activeReminder else { return }
+
+        if case .guided = reminder.state {
+            now = date
+            presentPanel(autoDismissAfter: nil, userInitiated: true)
+        }
+    }
+
+    private func ensureScheduleCoverage(after date: Date) {
+        for kind in ReminderKind.allCases where isReminderEnabled(kind) {
+            guard nextDue[kind] == nil else { continue }
+            if activeReminder?.kind == kind,
+               activeReminder?.state.isTerminal == false {
+                continue
+            }
+            setNextDue(nextScheduledDate(for: kind, after: date), for: kind)
+        }
+    }
+
+    private func appendOrReplacePending(_ reminder: ReminderInstance) {
+        if let index = pendingReminders.firstIndex(
+            where: { $0.kind == reminder.kind }
+        ) {
+            pendingReminders[index] = reminder
+        } else {
+            pendingReminders.append(reminder)
+        }
+    }
+
+    private func restoreManualPauseSuspension(
+        startedAt: Date,
+        at date: Date
+    ) {
+        clockSuspensionStartedAt = date
+        systemInactivity.reset()
+        suspendedSchedule = reminderSchedulePolicy.captureForSuspension(
+            nextDue: nextDue,
+            deferredIntervalRemaining: deferredIntervalRemaining,
+            at: startedAt
+        )
+        if let suspendedSchedule {
+            updateDeferredIntervalRemaining(
+                reminderSchedulePolicy.intervalRemaining(
+                    in: suspendedSchedule,
+                    systemInactivity: 0
+                )
+            )
+        }
+        panelWasVisibleBeforePause = false
+        panelIsHovered = false
+        panelHasKeyboardFocus = false
+    }
+
+    private func restoreExpiredManualPause(
+        startedAt: Date,
+        at date: Date
+    ) {
+        let snapshot = reminderSchedulePolicy.captureForSuspension(
+            nextDue: nextDue,
+            deferredIntervalRemaining: deferredIntervalRemaining,
+            at: startedAt
+        )
+        nextDue = reminderSchedulePolicy.restore(
+            snapshot,
+            preserving: nextDue,
+            at: date,
+            systemInactivity: 0
+        )
+        updateDeferredIntervalRemaining(
+            reminderSchedulePolicy.intervalRemaining(
+                in: snapshot,
+                systemInactivity: 0
+            )
+        )
+    }
+
+    private func persistRuntimeStateIfNeeded(at date: Date) {
+        let persistentActive: ReminderInstance?
+        if activeReminder?.state.isTerminal == true {
+            persistentActive = nil
+        } else {
+            persistentActive = activeReminder
+        }
+
+        let snapshot = AppRuntimeSnapshot(
+            savedAt: date,
+            nextDue: nextDue,
+            deferredIntervalRemaining: deferredIntervalRemaining,
+            activeReminder: persistentActive,
+            activeIsManual: persistentActive == nil ? false : activeIsManual,
+            pendingReminders: pendingReminders,
+            pausedUntil: pausedUntil,
+            pauseStartedAt: pausedUntil == nil ? nil : manualPauseStartedAt
+        )
+        if let lastSavedRuntimeSnapshot,
+           snapshot.representsSameBusinessState(as: lastSavedRuntimeSnapshot) {
+            return
+        }
+
+        do {
+            try runtimeStateStore.save(snapshot)
+            lastSavedRuntimeSnapshot = snapshot
+        } catch {
+            lastError = "无法保存提醒状态：\(error)"
+        }
+    }
+
     private func rebuildSchedule(from date: Date) {
         var schedule: [ReminderKind: Date] = [:]
         if lastSettings.eyeEnabled {
@@ -1417,7 +1898,7 @@ final class AppModel: ObservableObject {
             || previous.workdayEndHour != current.workdayEndHour
 
         if !current.eyeEnabled {
-            setNextDue(nil, for: .eye)
+            suppressScheduledReminder(.eye, at: date)
         } else if !previous.eyeEnabled
                     || previous.eyeIntervalMinutes != current.eyeIntervalMinutes
                     || workdayChanged {
@@ -1434,7 +1915,7 @@ final class AppModel: ObservableObject {
         }
 
         if !current.standingEnabled {
-            setNextDue(nil, for: .standing)
+            suppressScheduledReminder(.standing, at: date)
         } else if !previous.standingEnabled
                     || previous.standingIntervalMinutes != current.standingIntervalMinutes
                     || workdayChanged {
@@ -1453,9 +1934,122 @@ final class AppModel: ObservableObject {
         let quietCadenceChanged = previous.quietDailyCount != current.quietDailyCount
             || workdayChanged
         if !current.quietEnabled {
-            nextDue[.quietPractice] = nil
+            suppressScheduledReminder(.quietPractice, at: date)
         } else if !previous.quietEnabled || quietCadenceChanged {
             nextDue[.quietPractice] = nextQuietDate(after: date)
+        }
+    }
+
+    /// A guidance snapshot may defer harmless interval edits, but it must not
+    /// keep a disabled reminder alive. Applying only enabled -> disabled edges
+    /// also ensures the frozen snapshot cannot recreate a quiet deadline while
+    /// a different kind is still guiding.
+    private func applyImmediateDisableChanges(
+        current: RuntimeSettings,
+        at date: Date
+    ) {
+        if lastSettings.eyeEnabled, !current.eyeEnabled {
+            lastSettings.eyeEnabled = false
+            suppressScheduledReminder(.eye, at: date)
+        }
+        if lastSettings.standingEnabled, !current.standingEnabled {
+            lastSettings.standingEnabled = false
+            suppressScheduledReminder(.standing, at: date)
+        }
+        if lastSettings.quietEnabled, !current.quietEnabled {
+            lastSettings.quietEnabled = false
+            suppressScheduledReminder(.quietPractice, at: date)
+        }
+    }
+
+    /// Clears every queued surface for a disabled kind. Manual previews are
+    /// intentionally left alone because the user explicitly requested them;
+    /// scheduled guidance is discarded after restoring the other kinds that
+    /// were frozen behind it.
+    private func suppressScheduledReminder(
+        _ kind: ReminderKind,
+        at date: Date
+    ) {
+        pendingReminders.removeAll { $0.kind == kind }
+        if let guidanceSchedule {
+            self.guidanceSchedule = reminderSchedulePolicy.removing(
+                kind,
+                from: guidanceSchedule
+            )
+        }
+        if let suspendedSchedule {
+            self.suspendedSchedule = reminderSchedulePolicy.removing(
+                kind,
+                from: suspendedSchedule
+            )
+        }
+
+        if ReminderRuntimePolicy.shouldDiscardActiveReminder(
+            of: kind,
+            reminder: activeReminder,
+            isManual: activeIsManual
+        ) {
+            if case .guided = activeReminder?.state {
+                restoreGuidanceSchedule(at: date)
+            }
+            discardActivePresentation()
+        } else if ReminderRuntimePolicy.shouldDiscardExitAnimation(
+            of: kind,
+            animation: exitAnimation,
+            isManual: activeIsManual
+        ) {
+            discardExitAnimation()
+        }
+
+        setNextDue(nil, for: kind)
+    }
+
+    /// Moves an automatic occurrence that survived until the workday boundary
+    /// back into scheduling state. Interval reminders resume immediately at the
+    /// next workday start; quiet practice returns to its normal daily cadence.
+    @discardableResult
+    private func deferAutomaticPresentationOutsideWorkdayIfNeeded(
+        at date: Date
+    ) -> Bool {
+        guard ReminderRuntimePolicy.shouldDeferOutsideWorkday(
+            reminder: activeReminder,
+            isManual: activeIsManual,
+            isWithinWorkday: isWithinWorkday(date)
+        ), let reminder = activeReminder else {
+            return false
+        }
+
+        let kind = reminder.kind
+        if case .guided = reminder.state {
+            restoreGuidanceSchedule(at: date)
+        }
+        discardActivePresentation()
+
+        guard isReminderEnabled(kind) else {
+            setNextDue(nil, for: kind)
+            return true
+        }
+
+        let deferredDate = reminderSchedulePolicy.deferredOccurrenceDate(
+            for: kind,
+            after: date
+        )
+        setNextDue(
+            deferredDate,
+            for: kind,
+            intervalRemaining: kind == .quietPractice ? nil : 0
+        )
+        return true
+    }
+
+    private func isReminderEnabled(_ kind: ReminderKind) -> Bool {
+        switch kind {
+        case .eye:
+            lastSettings.eyeEnabled
+        case .standing:
+            lastSettings.standingEnabled
+        case .quietPractice:
+            lastSettings.quietEnabled
         }
     }
 
@@ -1529,20 +2123,23 @@ final class AppModel: ObservableObject {
         autoDismissAt = nil
     }
 
-    private static func registerDefaults() {
-        AppSettings.registerDefaults()
+    private static func registerDefaults(in store: UserDefaults) {
+        AppSettings.registerDefaults(in: store)
     }
 
-    private static func readSettings() -> RuntimeSettings {
-        let defaults = UserDefaults.standard
+    private static func readSettings(in defaults: UserDefaults) -> RuntimeSettings {
         return RuntimeSettings(
             eyeEnabled: defaults.bool(forKey: SettingsKey.eyeReminderEnabled),
             eyeIntervalMinutes: max(1, defaults.integer(forKey: SettingsKey.eyeIntervalMinutes)),
+            eyeGuideDurationSeconds: max(1, defaults.integer(forKey: SettingsKey.eyeGuideDurationSeconds)),
             standingEnabled: defaults.bool(forKey: SettingsKey.standReminderEnabled),
             standingIntervalMinutes: max(1, defaults.integer(forKey: SettingsKey.standIntervalMinutes)),
+            standingGuideDurationSeconds: max(1, defaults.integer(forKey: SettingsKey.standGuideDurationSeconds)),
             quietEnabled: defaults.bool(forKey: SettingsKey.quietReminderEnabled),
             quietDailyCount: max(1, defaults.integer(forKey: SettingsKey.quietDailyCount)),
+            quietGuideDurationSeconds: max(1, defaults.integer(forKey: SettingsKey.quietGuideDurationSeconds)),
             seriousMode: defaults.bool(forKey: SettingsKey.seriousModeEnabled),
+            soundEnabled: defaults.bool(forKey: SettingsKey.soundEnabled),
             workdayStartHour: defaults.integer(forKey: SettingsKey.workdayStartHour),
             workdayEndHour: defaults.integer(forKey: SettingsKey.workdayEndHour)
         )

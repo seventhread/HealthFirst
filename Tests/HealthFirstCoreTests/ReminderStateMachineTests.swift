@@ -105,6 +105,60 @@ final class ReminderStateMachineTests: XCTestCase {
         }
     }
 
+    func testConfiguredGuideDurationIsSnapshottedByTheReminder() throws {
+        var reminder = ReminderInstance(
+            kind: .eye,
+            dueAt: origin,
+            guideDuration: 45
+        )
+
+        XCTAssertEqual(reminder.guideDuration, 45)
+        try reminder.handle(.deadlineReached, at: origin)
+        XCTAssertEqual(
+            try reminder.handle(.start, at: origin),
+            .guided(
+                startedAt: origin,
+                endsAt: origin.addingTimeInterval(45)
+            )
+        )
+    }
+
+    func testInvalidConfiguredGuideDurationFallsBackToKindDefault() {
+        let invalidDurations: [TimeInterval] = [
+            0,
+            -1,
+            .infinity,
+            -.infinity,
+            .nan
+        ]
+        for invalidDuration in invalidDurations {
+            let reminder = ReminderInstance(
+                kind: .standing,
+                dueAt: origin,
+                guideDuration: invalidDuration
+            )
+            XCTAssertEqual(reminder.guideDuration, 60)
+        }
+    }
+
+    func testDecodingLegacyReminderWithoutGuideDurationUsesDefault() throws {
+        let original = ReminderInstance(kind: .quietPractice, dueAt: origin)
+        let encoded = try JSONEncoder().encode(original)
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "guideDuration")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+
+        let decoded = try JSONDecoder().decode(
+            ReminderInstance.self,
+            from: legacyData
+        )
+
+        XCTAssertEqual(decoded.guideDuration, ReminderKind.quietPractice.guideDuration)
+        XCTAssertEqual(decoded.state, original.state)
+    }
+
     func testCountdownCannotCompleteEarlyAndCompletesAtDeadline() throws {
         var reminder = ReminderInstance(kind: .eye, dueAt: origin)
         try reminder.handle(.deadlineReached, at: origin)

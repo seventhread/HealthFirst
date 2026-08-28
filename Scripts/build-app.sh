@@ -6,7 +6,7 @@ SCRIPT_DIRECTORY="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIRECTORY:h}"
 CONFIGURATION="${1:-debug}"
 XCODE_DEVELOPER_PATH="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-BUILD_ROOT="${PROJECT_ROOT}/.build-app"
+BUILD_ROOT="${HEALTHFIRST_BUILD_ROOT:-${PROJECT_ROOT}/.build-app}"
 SWIFTPM_BUILD_ROOT="${BUILD_ROOT}/swiftpm"
 MODULE_CACHE_ROOT="${BUILD_ROOT}/module-cache"
 APP_BUNDLE="${BUILD_ROOT}/HealthFirst.app"
@@ -68,6 +68,9 @@ fi
 /bin/cp \
     "${PROJECT_ROOT}/Support/HealthFirst-Info.plist" \
     "${CONTENTS_DIRECTORY}/Info.plist"
+
+"${SCRIPT_DIRECTORY}/make-app-icon.sh" \
+    "${CONTENTS_DIRECTORY}/Resources/HealthFirst.icns"
 
 /usr/bin/plutil -lint "${CONTENTS_DIRECTORY}/Info.plist"
 /usr/bin/codesign --force --deep --sign - "${APP_BUNDLE}"
